@@ -167,7 +167,7 @@ const { writeFile: stage4wWrite } = await import('node:fs/promises');
 const STAGE4W_RELEASE = 'tax-2026.09.30-01';
 const dyntaxaRow = { external_id: 'urn:lsid:dyntaxa.se:Taxon:3423', external_name: 'Pholiotina rugosa', id_role: 'accepted', is_preferred: false, namespace: 'dyntaxa_taxon_id', note: 'authoritative_bridge:manual_approved_exact', source_system: 'dyntaxa', taxon_id: 83668 };
 const national = (sv) => Object.fromEntries(['no', 'sv'].flatMap(c => ['', '_source_system', '_namespace', '_external_id'].map(s => [`preferred_scientific_name_${c}${s}`, null])).concat(sv ? [['preferred_scientific_name_sv', 'Pholiotina rugosa'], ['preferred_scientific_name_sv_source_system', 'dyntaxa'], ['preferred_scientific_name_sv_namespace', 'dyntaxa_taxon_id'], ['preferred_scientific_name_sv_external_id', 'urn:lsid:dyntaxa.se:Taxon:3423']] : []));
-const APPROVED = { status: 'candidate_build_only', export_use: 'release', importable: true, decision: { content_release_id: STAGE4W_RELEASE, sqlite_sha256: 'b'.repeat(64), approved_by: 'test', approved_at: '2026-10-23T00:00:00Z', decision_reference: 'test' } };
+const APPROVED = { status: 'candidate_build_only', export_use: 'release', importable: true, decision: { decision: 'release_approved', content_release_id: STAGE4W_RELEASE, sqlite_sha256: 'b'.repeat(64), approved_by: 'test', approved_at: '2026-10-23T00:00:00Z', decision_reference: 'test' } };
 async function stage4wRelease(externalExtra, { withDyntaxa = true, approval = APPROVED, gz = 'a'.repeat(64), sqliteSha = 'b'.repeat(64) } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stage4w-release-'));
   const sha = bytes => stage4wHash('sha256').update(bytes).digest('hex');
@@ -321,17 +321,48 @@ for (const [label, approval, pattern] of [
 });
 
 
-test('import SQL serialises with reference writers before any write and checks selections after activation', async () => {
+test('import SQL write-locks every reference holder at cutover and checks selections after activation', async () => {
   const root = await stage4wRelease([]);
   const out = await mkdtemp(path.join(os.tmpdir(), 'locks-out-'));
   try {
     const prepared = await prepareProductionReleaseImport({ releaseDir: root, output: path.join(out, 'import.sql'), releaseId: STAGE4W_RELEASE });
     const sql = await readFile(prepared.generated_sql_path, 'utf8');
     const lock = sql.indexOf('LOCK TABLE public.taxonomy_v2_releases IN ACCESS EXCLUSIVE MODE;');
-    assert.ok(lock > sql.indexOf('pg_advisory_xact_lock') && lock < sql.indexOf('INSERT INTO'));
-    assert.ok(sql.indexOf("SET LOCAL lock_timeout = '10s';") < lock && sql.includes("SET LOCAL statement_timeout = '30min';"));
+    assert.ok(lock > sql.lastIndexOf('COPY taxonomy_v2_stage'));  // locks only at cutover
+    assert.ok(sql.indexOf("SET LOCAL lock_timeout = '10s';") < sql.indexOf('pg_advisory_xact_lock') && sql.includes("SET LOCAL statement_timeout = '30min';"));
     for (const table of REFERENCE_HOLDER_TABLES) assert.ok(sql.includes(table));
     assert.match(sql, /IN SHARE ROW EXCLUSIVE MODE;/);
     assert.ok(sql.indexOf('an observation selects a concept absent from the new active release') > sql.indexOf('taxonomy_v2_activate_release('));
+  } finally { await rm(root, { recursive: true }); await rm(out, { recursive: true }); }
+});
+
+
+test('release approval: a preparation-only decision relabelled importable is refused', async () => {
+  const relabelled = { ...REHEARSAL, export_use: 'release', importable: true };
+  const root = await stage4wRelease([], { approval: relabelled });
+  const out = await mkdtemp(path.join(os.tmpdir(), 'relabel-out-'));
+  try {
+    await assert.rejects(prepareProductionReleaseImport({ releaseDir: root, output: path.join(out, 'import.sql'), releaseId: STAGE4W_RELEASE }), /release decision is release_preparation_approved, not release_approved/);
+    assert.equal(existsSync(path.join(out, 'import.sql')), false);
+  } finally { await rm(root, { recursive: true }); await rm(out, { recursive: true }); }
+});
+
+test('import SQL: limits precede every wait and the cutover locks follow loading in activation order', async () => {
+  const root = await stage4wRelease([]);
+  const out = await mkdtemp(path.join(os.tmpdir(), 'order-out-'));
+  try {
+    const prepared = await prepareProductionReleaseImport({ releaseDir: root, output: path.join(out, 'import.sql'), releaseId: STAGE4W_RELEASE });
+    const sql = await readFile(prepared.generated_sql_path, 'utf8');
+    const at = text => { const i = sql.indexOf(text); assert.ok(i >= 0, text); return i; };
+    assert.ok(at("SET LOCAL lock_timeout") < at('pg_advisory_xact_lock('));
+    const lastCopy = sql.lastIndexOf('COPY taxonomy_v2_stage');
+    const activationLock = at('pg_advisory_xact_lock(846920026072413002::bigint)');
+    const releaseLock = at('LOCK TABLE public.taxonomy_v2_releases IN ACCESS EXCLUSIVE MODE;');
+    const holderLock = at('IN SHARE ROW EXCLUSIVE MODE;');
+    assert.ok(lastCopy < at('DO $validate$') && at('$validate$;') < activationLock);
+    assert.ok(activationLock < releaseLock && releaseLock < holderLock && holderLock < at('INSERT INTO taxonomy_v2_protected_before'));
+    assert.ok(at('INSERT INTO taxonomy_v2_protected_before') < at('taxonomy_v2_activate_release(' + "'"));
+    assert.ok(at('an observation selects a concept absent') > at('taxonomy_v2_activate_release(' + "'") && at('an observation selects a concept absent') < at('COMMIT;'));
+    assert.equal(sql.indexOf('LOCK TABLE'), releaseLock);  // no table lock during loading
   } finally { await rm(root, { recursive: true }); await rm(out, { recursive: true }); }
 });

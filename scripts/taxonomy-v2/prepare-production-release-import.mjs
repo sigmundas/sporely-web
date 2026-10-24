@@ -9,6 +9,8 @@ import { createDyntaxaRowCollector, NATIONAL_NAME_FIELDS } from './lib/export-co
 
 const PROJECT_REF = 'zkpjklzfwzefhjluvhfw';
 const IMPORT_LOCK_TIMEOUT = '10s';
+// taxonomy_v2_activate_release's own advisory lock (migration 20260724130000).
+const ACTIVATION_ADVISORY_LOCK = '846920026072413002';
 const IMPORT_STATEMENT_TIMEOUT = '30min';
 // Tables that store Sporely taxon ids or are protected below; writes to them
 // wait while the import runs.
@@ -20,6 +22,9 @@ export const REFERENCE_HOLDER_TABLES = [
   'taxonomy_v3.registry_concept', 'taxonomy_v3.external_mapping', 'taxonomy_v3.identification_snapshot',
   'taxonomy_v3.resolution_link', 'taxonomy_v3.release_installation', 'taxonomy_v3.supplement_installation',
   'taxonomy_v3.reconciliation_manifest_audit',
+  // Repair audit holders of Sporely ids (their apply routines take the release lock first).
+  'private.retired_resolution_repair_items', 'private.retired_resolution_repair_registry_additions',
+  'private.taxon_identity_repair_items', 'private.taxon_identity_repair_reference_actions',
 ];
 // A local-rehearsal payload runs only where this table exists. It is created
 // by the disposable rehearsal harness and never exists in production.
@@ -147,6 +152,7 @@ function verifyReleaseApproval(manifest, releaseId, sourceGzSha256, localRehears
   assert(approval.export_use === 'release', 'release_approval export_use must be release');
   const decision = approval.decision;
   assert(decision && typeof decision === 'object', 'release_approval has no bound release decision');
+  assert(decision.decision === 'release_approved', `release decision is ${decision.decision ?? 'missing'}, not release_approved`);
   assert(decision.content_release_id === releaseId, 'release decision is bound to a different release');
   assert(/^[0-9a-f]{64}$/.test(String(decision.sqlite_sha256 ?? '')), 'release decision has no SQLite SHA-256');
   const sourceSqliteSha = manifest.source_hashes?.sqlite_sha256;
@@ -327,7 +333,6 @@ function preamble(verified) {
     'taxonomy_v2_vernacular_names','taxonomy_v2_external_ids','taxonomy_v2_legacy_external_ids',
     'taxonomy_v2_redlist','taxonomy_v2_import_runs',
   ];
-  const legacyQueries = [...new Set(Object.values(verified.probes).map(probe => probe.query))];
   const nonce = m.localRehearsal ? localRehearsalNonce(TARGET_RELEASE, m.manifestSha256) : '';
   const rehearsalGuard = m.localRehearsal ? `
 -- LOCAL REHEARSAL ONLY. Runs only where ${LOCAL_REHEARSAL_MARKER} holds the row
@@ -355,21 +360,15 @@ BEGIN;
 -- DO NOT COMMIT
 -- PROJECT REF: ${PROJECT_REF}
 -- RELEASE: ${TARGET_RELEASE}
-${rehearsalGuard}
-select pg_catalog.pg_advisory_xact_lock(${IMPORT_ADVISORY_LOCK}::bigint);
-
--- Explicit limits: fail cleanly rather than queue behind or hold locks indefinitely.
+-- Explicit limits before any wait: every lock wait (advisory and table) is
+-- bounded by lock_timeout, every statement by statement_timeout.
 SET LOCAL lock_timeout = '${IMPORT_LOCK_TIMEOUT}';
 SET LOCAL statement_timeout = '${IMPORT_STATEMENT_TIMEOUT}';
--- Serialise with every writer that validates a Sporely id against the active
--- release. ACCESS EXCLUSIVE on the release table waits for in-flight
--- transactions that already read it (a selection RPC that validated against
--- the old release commits first and is checked below); later ones wait and
--- then validate against the new release. Reference holders are write-locked
--- so the protected-state comparison cannot be tripped. Reads of the reference
--- holders stay available; taxonomy reads wait for the few seconds of import.
-LOCK TABLE public.taxonomy_v2_releases IN ACCESS EXCLUSIVE MODE;
-LOCK TABLE ${REFERENCE_HOLDER_TABLES.join(', ')} IN SHARE ROW EXCLUSIVE MODE;
+${rehearsalGuard}
+select pg_catalog.pg_advisory_xact_lock(${IMPORT_ADVISORY_LOCK}::bigint);
+-- Loading, validation and the count checks below take no lock that blocks
+-- clients: the new release stays status 'loading'/'ready' and invisible to
+-- search until the short cutover at the end.
 
 DO $preflight$
 DECLARE
@@ -405,14 +404,6 @@ BEGIN
   END IF;
 END
 $preflight$;
-
-CREATE TEMP TABLE taxonomy_v2_protected_before(value jsonb) ON COMMIT DROP;
-INSERT INTO taxonomy_v2_protected_before VALUES (${protectedStateSql()});
-
-CREATE TEMP TABLE taxonomy_v2_legacy_search_before(query text primary key, result jsonb) ON COMMIT DROP;
-INSERT INTO taxonomy_v2_legacy_search_before(query,result)
-SELECT probe.query, coalesce((SELECT jsonb_agg(to_jsonb(s) ORDER BY to_jsonb(s)::text) FROM public.search_taxa(probe.query,'no',50) s),'[]'::jsonb)
-  FROM (VALUES ${legacyQueries.map(value => `(${sqlText(value)})`).join(',')}) probe(query);
 
 SELECT set_config('taxonomy_v2.release_id',${sqlText(TARGET_RELEASE)},true);
 INSERT INTO public.taxonomy_v2_releases(
@@ -471,6 +462,27 @@ BEGIN
   IF pg_catalog.jsonb_array_length(v_result) > 0 THEN RAISE EXCEPTION 'taxonomy-v2 national-name validation failed: %',v_result; END IF;
 END
 $validate$;
+
+-- ===== Cutover: the only part that blocks clients; commit follows at once. =====
+-- Lock order as standalone activation (its advisory lock, then the release
+-- table) and as the repair-apply routines (release first, then holders), so
+-- no deadlock with either. ACCESS EXCLUSIVE on taxonomy_v2_releases is the
+-- weakest mode that conflicts with ACCESS SHARE: a selection RPC that read the
+-- active release (validated) holds ACCESS SHARE until it commits, so this lock
+-- drains it, and later RPCs wait at their validation read and then see the new
+-- release. EXCLUSIVE or weaker would let an RPC validate against the old
+-- release during the cutover and write after commit.
+select pg_catalog.pg_advisory_xact_lock(${ACTIVATION_ADVISORY_LOCK}::bigint);
+LOCK TABLE public.taxonomy_v2_releases IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE ${REFERENCE_HOLDER_TABLES.join(', ')} IN SHARE ROW EXCLUSIVE MODE;
+-- Fresh snapshot with every writer drained and blocked: nothing can change
+-- these tables between here and COMMIT except this transaction.
+CREATE TEMP TABLE taxonomy_v2_protected_before(value jsonb) ON COMMIT DROP;
+INSERT INTO taxonomy_v2_protected_before VALUES (${protectedStateSql()});
+CREATE TEMP TABLE taxonomy_v2_legacy_search_before(query text primary key, result jsonb) ON COMMIT DROP;
+INSERT INTO taxonomy_v2_legacy_search_before(query,result)
+SELECT probe.query, coalesce((SELECT jsonb_agg(to_jsonb(s) ORDER BY to_jsonb(s)::text) FROM public.search_taxa(probe.query,'no',50) s),'[]'::jsonb)
+  FROM (VALUES ${[...new Set(Object.values(p).map(probe => probe.query))].map(value => `(${sqlText(value)})`).join(',')}) probe(query);
 
 DO $activate$
 DECLARE v_result jsonb;
