@@ -275,3 +275,42 @@ test('release approval: an approved export and a pinned pre-marker release both 
     } finally { await rm(root, { recursive: true }); await rm(out, { recursive: true }); }
   }
 });
+
+// Release preparation only (owner approval of preparation, not of import): a
+// local_rehearsal export prepares only in local-rehearsal mode, and that SQL
+// refuses to run on any database without the rehearsal marker table.
+const REHEARSAL = { status: 'pending:candidate_build_only', export_use: 'local_rehearsal', importable: false, decision: { decision: 'release_preparation_approved', content_release_id: STAGE4W_RELEASE, sqlite_sha256: 'b'.repeat(64), approved_by: 'test', approved_at: '2026-10-24', decision_reference: 'test' } };
+test('preparation only: the production path refuses a local-rehearsal export', async () => {
+  const root = await stage4wRelease([], { approval: REHEARSAL });
+  const out = await mkdtemp(path.join(os.tmpdir(), 'rehearsal-out-'));
+  try {
+    await assert.rejects(prepareProductionReleaseImport({ releaseDir: root, output: path.join(out, 'import.sql'), releaseId: STAGE4W_RELEASE }), /not importable \(export_use: local_rehearsal\)/);
+    assert.equal(existsSync(path.join(out, 'import.sql')), false);
+  } finally { await rm(root, { recursive: true }); await rm(out, { recursive: true }); }
+});
+
+test('preparation only: local-rehearsal SQL carries the marker guard before any write', async () => {
+  const root = await stage4wRelease([], { approval: REHEARSAL });
+  const out = await mkdtemp(path.join(os.tmpdir(), 'rehearsal-out-'));
+  try {
+    const prepared = await prepareProductionReleaseImport({ releaseDir: root, output: path.join(out, 'import.sql'), releaseId: STAGE4W_RELEASE, localRehearsal: true });
+    const sql = await readFile(prepared.generated_sql_path, 'utf8');
+    const guard = sql.indexOf("to_regclass('public.sporely_local_rehearsal_marker') IS NULL");
+    assert.ok(guard > 0 && guard < sql.indexOf('pg_advisory_xact_lock') && guard < sql.indexOf('INSERT INTO'));
+    assert.match(sql, /LOCAL REHEARSAL TAXONOMY IMPORT \(NOT FOR PRODUCTION\)/);
+    assert.doesNotMatch(prepared.containerised_psql_command, /production-db\.env/);
+  } finally { await rm(root, { recursive: true }); await rm(out, { recursive: true }); }
+});
+
+for (const [label, approval, pattern] of [
+  ['an importable release export', APPROVED, /needs a local_rehearsal export/],
+  ['a validation-only export', VALIDATION_ONLY, /needs a local_rehearsal export/],
+  ['a rehearsal export bound to another release', { ...REHEARSAL, decision: { ...REHEARSAL.decision, content_release_id: 'tax-2026.10.23-01' } }, /bound to a different release/],
+  ['a rehearsal export without a preparation decision', { ...REHEARSAL, decision: { ...REHEARSAL.decision, decision: 'pending' } }, /no bound preparation decision/],
+]) test(`preparation only: local rehearsal refuses ${label}`, async () => {
+  const root = await stage4wRelease([], { approval });
+  const out = await mkdtemp(path.join(os.tmpdir(), 'rehearsal-out-'));
+  try {
+    await assert.rejects(prepareProductionReleaseImport({ releaseDir: root, output: path.join(out, 'import.sql'), releaseId: STAGE4W_RELEASE, localRehearsal: true }), pattern);
+  } finally { await rm(root, { recursive: true }); await rm(out, { recursive: true }); }
+});
