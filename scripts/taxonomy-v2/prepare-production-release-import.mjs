@@ -8,9 +8,30 @@ import { pathToFileURL } from 'node:url';
 import { createDyntaxaRowCollector, NATIONAL_NAME_FIELDS } from './lib/export-contract.mjs';
 
 const PROJECT_REF = 'zkpjklzfwzefhjluvhfw';
+const IMPORT_LOCK_TIMEOUT = '10s';
+const IMPORT_STATEMENT_TIMEOUT = '30min';
+// Tables that store Sporely taxon ids or are protected below; writes to them
+// wait while the import runs.
+export const REFERENCE_HOLDER_TABLES = [
+  'public.observations', 'public.taxa', 'public.taxa_vernacular',
+  'public.reference_taxon_treatments', 'public.reference_curated_forks',
+  'private.shared_reference_contributions', 'private.curated_reference_treatment_taxa',
+  'private.curated_reference_publication_taxa', 'private.curated_reference_taxon_treatments',
+  'taxonomy_v3.registry_concept', 'taxonomy_v3.external_mapping', 'taxonomy_v3.identification_snapshot',
+  'taxonomy_v3.resolution_link', 'taxonomy_v3.release_installation', 'taxonomy_v3.supplement_installation',
+  'taxonomy_v3.reconciliation_manifest_audit',
+];
 // A local-rehearsal payload runs only where this table exists. It is created
 // by the disposable rehearsal harness and never exists in production.
 export const LOCAL_REHEARSAL_MARKER = 'public.sporely_local_rehearsal_marker';
+// pg_control_system().system_identifier of the production database (recorded
+// by a read-only preflight on 2026-10-24; not a secret). Rehearsal SQL refuses it.
+export const PRODUCTION_SYSTEM_IDENTIFIER = '7606130613603586966';
+// The marker row a rehearsal database must hold: bound to the release and to
+// this exact export, so a stray marker relation is not enough.
+export function localRehearsalNonce(releaseId, manifestSha256) {
+  return createHash('sha256').update(`sporely-local-rehearsal:${releaseId}:${manifestSha256}`).digest('hex');
+}
 // The release to import is named explicitly by the operator (--release-id)
 // and must match the export's own manifests; nothing is imported by default.
 const RELEASE_ID_PATTERN = /^tax-\d{4}\.\d{2}\.\d{2}-\d{2}$/;
@@ -307,12 +328,22 @@ function preamble(verified) {
     'taxonomy_v2_redlist','taxonomy_v2_import_runs',
   ];
   const legacyQueries = [...new Set(Object.values(verified.probes).map(probe => probe.query))];
+  const nonce = m.localRehearsal ? localRehearsalNonce(TARGET_RELEASE, m.manifestSha256) : '';
   const rehearsalGuard = m.localRehearsal ? `
--- LOCAL REHEARSAL ONLY: refuses to run unless ${LOCAL_REHEARSAL_MARKER} exists
+-- LOCAL REHEARSAL ONLY. Runs only where ${LOCAL_REHEARSAL_MARKER} holds the row
+-- (release_id, nonce) = ('${TARGET_RELEASE}', '${nonce}') and never on the production cluster.
 DO $local_rehearsal$
+DECLARE v_ok boolean;
 BEGIN
+  IF (SELECT system_identifier::text FROM pg_catalog.pg_control_system()) = '${PRODUCTION_SYSTEM_IDENTIFIER}' THEN
+    RAISE EXCEPTION 'local rehearsal payload refused: this is the production database';
+  END IF;
   IF to_regclass('${LOCAL_REHEARSAL_MARKER}') IS NULL THEN
     RAISE EXCEPTION 'local rehearsal payload refused: % does not exist (this is not a rehearsal database)', '${LOCAL_REHEARSAL_MARKER}';
+  END IF;
+  EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s WHERE release_id = %L AND nonce = %L)', '${LOCAL_REHEARSAL_MARKER}', '${TARGET_RELEASE}', '${nonce}') INTO v_ok;
+  IF NOT v_ok THEN
+    RAISE EXCEPTION 'local rehearsal payload refused: no marker row for this release and export';
   END IF;
 END
 $local_rehearsal$;
@@ -326,6 +357,19 @@ BEGIN;
 -- RELEASE: ${TARGET_RELEASE}
 ${rehearsalGuard}
 select pg_catalog.pg_advisory_xact_lock(${IMPORT_ADVISORY_LOCK}::bigint);
+
+-- Explicit limits: fail cleanly rather than queue behind or hold locks indefinitely.
+SET LOCAL lock_timeout = '${IMPORT_LOCK_TIMEOUT}';
+SET LOCAL statement_timeout = '${IMPORT_STATEMENT_TIMEOUT}';
+-- Serialise with every writer that validates a Sporely id against the active
+-- release. ACCESS EXCLUSIVE on the release table waits for in-flight
+-- transactions that already read it (a selection RPC that validated against
+-- the old release commits first and is checked below); later ones wait and
+-- then validate against the new release. Reference holders are write-locked
+-- so the protected-state comparison cannot be tripped. Reads of the reference
+-- holders stay available; taxonomy reads wait for the few seconds of import.
+LOCK TABLE public.taxonomy_v2_releases IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE ${REFERENCE_HOLDER_TABLES.join(', ')} IN SHARE ROW EXCLUSIVE MODE;
 
 DO $preflight$
 DECLARE
@@ -455,6 +499,13 @@ DO $protected$
 DECLARE v_before jsonb; v_after jsonb;
 BEGIN
   SELECT value INTO v_before FROM taxonomy_v2_protected_before;
+  -- Every selected concept must be in the newly active release (the
+  -- selection RPC's invariant), including any written just before the locks.
+  IF EXISTS (SELECT 1 FROM public.observations o WHERE o.selected_sporely_taxon_id IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM public.taxonomy_v2_taxa t JOIN public.taxonomy_v2_releases r ON r.release_id=t.release_id
+                             WHERE r.status='active' AND t.sporely_taxon_id=o.selected_sporely_taxon_id)) THEN
+    RAISE EXCEPTION 'an observation selects a concept absent from the new active release';
+  END IF;
   v_after := ${protectedStateSql()};
   IF v_before IS DISTINCT FROM v_after THEN RAISE EXCEPTION 'protected legacy, taxonomy-v3, or observation state changed'; END IF;
   IF EXISTS (
