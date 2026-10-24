@@ -6,6 +6,7 @@ import { createClient } from 'jsr:@supabase/supabase-js@2'
 // file. Keeping it .js avoids the TS-import ceremony on both sides.
 // deno-lint-ignore-file no-explicit-any
 import { encodeObjectKey, normalizeStoragePath, runDeletionPlan } from './plan.js'
+import { createPrefixR2Client } from './r2Prefix.ts'
 
 const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
 const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
@@ -96,6 +97,8 @@ Deno.serve(async req => {
       admin,
       worker,
       r2Keys: new Set<string>(),
+      r2: createPrefixR2Client(Deno.env.toObject()),
+      signOutEverywhere: () => admin.auth.admin.signOut(authHeader.replace(/^Bearer\s+/i, ''), 'global'),
     })
 
     if (result.ok) {

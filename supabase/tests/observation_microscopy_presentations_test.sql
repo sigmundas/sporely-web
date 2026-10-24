@@ -132,7 +132,7 @@ BEGIN
   -- Three active microscope measurements (types: 'spore', 'manual', NULL).
   INSERT INTO public.observation_images
     (observation_id, user_id, image_type, sort_order, storage_path, canonical_bucket)
-  VALUES (public_obs_id, owner_id, 'microscope', 1, 'private/test-micro.jpg', 'private')
+  VALUES (public_obs_id, owner_id, 'microscope', 1, owner_id::text || '/private/test-micro.jpg', 'private')
   RETURNING id INTO image_id;
 
   INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type)
@@ -144,7 +144,7 @@ BEGIN
   -- One field image measurement — must NOT count.
   INSERT INTO public.observation_images
     (observation_id, user_id, image_type, sort_order, storage_path, canonical_bucket)
-  VALUES (public_obs_id, owner_id, 'field', 2, 'private/field.jpg', 'private')
+  VALUES (public_obs_id, owner_id, 'field', 2, owner_id::text || '/private/field.jpg', 'private')
   RETURNING id INTO field_image_id;
 
   INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type)
@@ -153,7 +153,7 @@ BEGIN
   -- One purged microscope image measurement — must NOT count.
   INSERT INTO public.observation_images
     (observation_id, user_id, image_type, sort_order, storage_path, canonical_bucket, purged_at)
-  VALUES (public_obs_id, owner_id, 'microscope', 3, 'private/purged.jpg', 'private', now())
+  VALUES (public_obs_id, owner_id, 'microscope', 3, owner_id::text || '/private/purged.jpg', 'private', now())
   RETURNING id INTO purged_image_id;
 
   INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, measurement_type)
@@ -185,21 +185,21 @@ BEGIN
     (observation_id, user_id, storage_key, width_px, height_px, tile_size_px, version,
      tile_width_px, tile_height_px, common_crop_width_um, common_crop_height_um,
      media_version, canonical_bucket)
-  VALUES (mosaic_obs_id, owner_id, 'private/mosaic-v1.jpg', 800, 400, 64, 1, 64, 64, 10.0, 8.0, 1, 'private')
+  VALUES (mosaic_obs_id, owner_id, owner_id::text || '/private/mosaic-v1.jpg', 800, 400, 64, 1, 64, 64, 10.0, 8.0, 1, 'private')
   RETURNING id INTO mosaic_id_v1;
 
   INSERT INTO public.spore_measurement_mosaics
     (observation_id, user_id, storage_key, width_px, height_px, tile_size_px, version,
      tile_width_px, tile_height_px, common_crop_width_um, common_crop_height_um,
      media_version, canonical_bucket)
-  VALUES (mosaic_obs_id, owner_id, 'private/mosaic-v2.jpg', 1200, 600, 64, 2, 64, 64, 10.0, 8.0, 2, 'private')
+  VALUES (mosaic_obs_id, owner_id, owner_id::text || '/private/mosaic-v2.jpg', 1200, 600, 64, 2, 64, 64, 10.0, 8.0, 2, 'private')
   RETURNING id INTO mosaic_id_v2;
 
   INSERT INTO public.spore_measurement_mosaics
     (observation_id, user_id, storage_key, width_px, height_px, tile_size_px, version,
      tile_width_px, tile_height_px, common_crop_width_um, common_crop_height_um,
      media_version, canonical_bucket)
-  VALUES (mosaic_obs_id, owner_id, 'private/mosaic-v2b.jpg', 1600, 800, 64, 3, 64, 64, 10.0, 8.0, 3, 'private')
+  VALUES (mosaic_obs_id, owner_id, owner_id::text || '/private/mosaic-v2b.jpg', 1600, 800, 64, 3, 64, 64, 10.0, 8.0, 3, 'private')
   RETURNING id INTO mosaic_id_v2b;
 
   IF mosaic_id_v2b <= mosaic_id_v2 THEN
