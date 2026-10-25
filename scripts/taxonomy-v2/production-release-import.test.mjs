@@ -6,7 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { discoverLocalTarget, query, queryStdin, spawnSession } from './lib/docker-psql.mjs';
-import { prepareProductionReleaseImport } from './prepare-production-release-import.mjs';
+import { prepareProductionReleaseImport, localRehearsalNonce, REFERENCE_HOLDER_TABLES } from './prepare-production-release-import.mjs';
+import { createHash } from 'node:crypto';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..', '..');
 const RELEASE_DIR = path.resolve(REPO_ROOT, '..', 'sporely-py/database/reference_data/generated/taxonomy_v2/global_macrofungi_tax-2026.08.01-01');
@@ -166,7 +167,7 @@ const { writeFile: stage4wWrite } = await import('node:fs/promises');
 const STAGE4W_RELEASE = 'tax-2026.09.30-01';
 const dyntaxaRow = { external_id: 'urn:lsid:dyntaxa.se:Taxon:3423', external_name: 'Pholiotina rugosa', id_role: 'accepted', is_preferred: false, namespace: 'dyntaxa_taxon_id', note: 'authoritative_bridge:manual_approved_exact', source_system: 'dyntaxa', taxon_id: 83668 };
 const national = (sv) => Object.fromEntries(['no', 'sv'].flatMap(c => ['', '_source_system', '_namespace', '_external_id'].map(s => [`preferred_scientific_name_${c}${s}`, null])).concat(sv ? [['preferred_scientific_name_sv', 'Pholiotina rugosa'], ['preferred_scientific_name_sv_source_system', 'dyntaxa'], ['preferred_scientific_name_sv_namespace', 'dyntaxa_taxon_id'], ['preferred_scientific_name_sv_external_id', 'urn:lsid:dyntaxa.se:Taxon:3423']] : []));
-const APPROVED = { status: 'candidate_build_only', export_use: 'release', importable: true, decision: { content_release_id: STAGE4W_RELEASE, sqlite_sha256: 'b'.repeat(64), approved_by: 'test', approved_at: '2026-10-23T00:00:00Z', decision_reference: 'test' } };
+const APPROVED = { status: 'candidate_build_only', export_use: 'release', importable: true, decision: { decision: 'release_approved', content_release_id: STAGE4W_RELEASE, sqlite_sha256: 'b'.repeat(64), approved_by: 'test', approved_at: '2026-10-23T00:00:00Z', decision_reference: 'test' } };
 async function stage4wRelease(externalExtra, { withDyntaxa = true, approval = APPROVED, gz = 'a'.repeat(64), sqliteSha = 'b'.repeat(64) } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stage4w-release-'));
   const sha = bytes => stage4wHash('sha256').update(bytes).digest('hex');
@@ -274,4 +275,94 @@ test('release approval: an approved export and a pinned pre-marker release both 
       assert.ok(existsSync(prepared.generated_sql_path));
     } finally { await rm(root, { recursive: true }); await rm(out, { recursive: true }); }
   }
+});
+
+// Release preparation only (owner approval of preparation, not of import): a
+// local_rehearsal export prepares only in local-rehearsal mode, and that SQL
+// refuses to run on any database without the rehearsal marker table.
+const REHEARSAL = { status: 'pending:candidate_build_only', export_use: 'local_rehearsal', importable: false, decision: { decision: 'release_preparation_approved', content_release_id: STAGE4W_RELEASE, sqlite_sha256: 'b'.repeat(64), approved_by: 'test', approved_at: '2026-10-24', decision_reference: 'test' } };
+test('preparation only: the production path refuses a local-rehearsal export', async () => {
+  const root = await stage4wRelease([], { approval: REHEARSAL });
+  const out = await mkdtemp(path.join(os.tmpdir(), 'rehearsal-out-'));
+  try {
+    await assert.rejects(prepareProductionReleaseImport({ releaseDir: root, output: path.join(out, 'import.sql'), releaseId: STAGE4W_RELEASE }), /not importable \(export_use: local_rehearsal\)/);
+    assert.equal(existsSync(path.join(out, 'import.sql')), false);
+  } finally { await rm(root, { recursive: true }); await rm(out, { recursive: true }); }
+});
+
+test('preparation only: local-rehearsal SQL carries the marker guard before any write', async () => {
+  const root = await stage4wRelease([], { approval: REHEARSAL });
+  const out = await mkdtemp(path.join(os.tmpdir(), 'rehearsal-out-'));
+  try {
+    const prepared = await prepareProductionReleaseImport({ releaseDir: root, output: path.join(out, 'import.sql'), releaseId: STAGE4W_RELEASE, localRehearsal: true });
+    const sql = await readFile(prepared.generated_sql_path, 'utf8');
+    const guard = sql.indexOf("to_regclass('public.sporely_local_rehearsal_marker') IS NULL");
+    assert.ok(guard > 0 && guard < sql.indexOf('pg_advisory_xact_lock') && guard < sql.indexOf('INSERT INTO'));
+    assert.match(sql, /LOCAL REHEARSAL TAXONOMY IMPORT \(NOT FOR PRODUCTION\)/);
+    assert.ok(sql.includes("system_identifier::text FROM pg_catalog.pg_control_system()) = '7606130613603586966'"));
+    const manifestSha = createHash('sha256').update(await readFile(path.join(root, 'taxonomy_export_manifest.json'))).digest('hex');
+    assert.ok(sql.includes(localRehearsalNonce(STAGE4W_RELEASE, manifestSha)));
+    assert.ok(sql.indexOf('pg_control_system') < sql.indexOf('INSERT INTO'));
+    assert.doesNotMatch(prepared.containerised_psql_command, /production-db\.env/);
+  } finally { await rm(root, { recursive: true }); await rm(out, { recursive: true }); }
+});
+
+for (const [label, approval, pattern] of [
+  ['an importable release export', APPROVED, /needs a local_rehearsal export/],
+  ['a validation-only export', VALIDATION_ONLY, /needs a local_rehearsal export/],
+  ['a rehearsal export bound to another release', { ...REHEARSAL, decision: { ...REHEARSAL.decision, content_release_id: 'tax-2026.10.23-01' } }, /bound to a different release/],
+  ['a rehearsal export without a preparation decision', { ...REHEARSAL, decision: { ...REHEARSAL.decision, decision: 'pending' } }, /no bound preparation decision/],
+]) test(`preparation only: local rehearsal refuses ${label}`, async () => {
+  const root = await stage4wRelease([], { approval });
+  const out = await mkdtemp(path.join(os.tmpdir(), 'rehearsal-out-'));
+  try {
+    await assert.rejects(prepareProductionReleaseImport({ releaseDir: root, output: path.join(out, 'import.sql'), releaseId: STAGE4W_RELEASE, localRehearsal: true }), pattern);
+  } finally { await rm(root, { recursive: true }); await rm(out, { recursive: true }); }
+});
+
+
+test('import SQL write-locks every reference holder at cutover and checks selections after activation', async () => {
+  const root = await stage4wRelease([]);
+  const out = await mkdtemp(path.join(os.tmpdir(), 'locks-out-'));
+  try {
+    const prepared = await prepareProductionReleaseImport({ releaseDir: root, output: path.join(out, 'import.sql'), releaseId: STAGE4W_RELEASE });
+    const sql = await readFile(prepared.generated_sql_path, 'utf8');
+    const lock = sql.indexOf('LOCK TABLE public.taxonomy_v2_releases IN ACCESS EXCLUSIVE MODE;');
+    assert.ok(lock > sql.lastIndexOf('COPY taxonomy_v2_stage'));  // locks only at cutover
+    assert.ok(sql.indexOf("SET LOCAL lock_timeout = '10s';") < sql.indexOf('pg_advisory_xact_lock') && sql.includes("SET LOCAL statement_timeout = '30min';"));
+    for (const table of REFERENCE_HOLDER_TABLES) assert.ok(sql.includes(table));
+    assert.match(sql, /IN SHARE ROW EXCLUSIVE MODE;/);
+    assert.ok(sql.indexOf('an observation selects a concept absent from the new active release') > sql.indexOf('taxonomy_v2_activate_release('));
+  } finally { await rm(root, { recursive: true }); await rm(out, { recursive: true }); }
+});
+
+
+test('release approval: a preparation-only decision relabelled importable is refused', async () => {
+  const relabelled = { ...REHEARSAL, export_use: 'release', importable: true };
+  const root = await stage4wRelease([], { approval: relabelled });
+  const out = await mkdtemp(path.join(os.tmpdir(), 'relabel-out-'));
+  try {
+    await assert.rejects(prepareProductionReleaseImport({ releaseDir: root, output: path.join(out, 'import.sql'), releaseId: STAGE4W_RELEASE }), /release decision is release_preparation_approved, not release_approved/);
+    assert.equal(existsSync(path.join(out, 'import.sql')), false);
+  } finally { await rm(root, { recursive: true }); await rm(out, { recursive: true }); }
+});
+
+test('import SQL: limits precede every wait and the cutover locks follow loading in activation order', async () => {
+  const root = await stage4wRelease([]);
+  const out = await mkdtemp(path.join(os.tmpdir(), 'order-out-'));
+  try {
+    const prepared = await prepareProductionReleaseImport({ releaseDir: root, output: path.join(out, 'import.sql'), releaseId: STAGE4W_RELEASE });
+    const sql = await readFile(prepared.generated_sql_path, 'utf8');
+    const at = text => { const i = sql.indexOf(text); assert.ok(i >= 0, text); return i; };
+    assert.ok(at("SET LOCAL lock_timeout") < at('pg_advisory_xact_lock('));
+    const lastCopy = sql.lastIndexOf('COPY taxonomy_v2_stage');
+    const activationLock = at('pg_advisory_xact_lock(846920026072413002::bigint)');
+    const releaseLock = at('LOCK TABLE public.taxonomy_v2_releases IN ACCESS EXCLUSIVE MODE;');
+    const holderLock = at('IN SHARE ROW EXCLUSIVE MODE;');
+    assert.ok(lastCopy < at('DO $validate$') && at('$validate$;') < activationLock);
+    assert.ok(activationLock < releaseLock && releaseLock < holderLock && holderLock < at('INSERT INTO taxonomy_v2_protected_before'));
+    assert.ok(at('INSERT INTO taxonomy_v2_protected_before') < at('taxonomy_v2_activate_release(' + "'"));
+    assert.ok(at('an observation selects a concept absent') > at('taxonomy_v2_activate_release(' + "'") && at('an observation selects a concept absent') < at('COMMIT;'));
+    assert.equal(sql.indexOf('LOCK TABLE'), releaseLock);  // no table lock during loading
+  } finally { await rm(root, { recursive: true }); await rm(out, { recursive: true }); }
 });
