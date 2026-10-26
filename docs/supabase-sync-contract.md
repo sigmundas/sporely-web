@@ -534,26 +534,18 @@ missing extension equals an explicitly null one, real statistics are a genuine
 difference, and an unsupported version is never projectable, so it is never
 equal to anything. Nothing rewrites or enriches a historical snapshot;
 replacement evidence goes through explicit refresh or successor adoption.
-Enhanced content becoming frozen evidence is held behind the
-minimum-supported-reader-version gate
-(`references/measurement_content_gates.py` in `sporely-py`), which ships
-closed: while it is closed the desktop refuses to attach, refresh onto, or
-adopt an enhanced measurement set instead of freezing a lossy version-1
-snapshot of it.
+Full L/W/Q editing, v2 attachment and bundle export are enabled together for
+the single-user desktop. Migration `20261026180718_activate_reference_reported_statistics`
+activates the existing validators/builders at the current schema head and retires
+`private.reference_creation_blocked_by_older_client`. The pinned September
+migration remains excluded from deployment; its history is not repaired or
+retimed. Stale device records cannot block a capable request. Version-aware
+owner/public reads, format validation, ownership, CAS and RLS remain enforced.
 
-That gate covers observation attachment only, and is not a structural bar on
-version-2 generation. `private.share_reference_contribution_for_owner` is a
-second caller of `private.reference_canonical_snapshot`: its entry point
-`public.share_reference_contribution` is granted to `authenticated`, and the
-resulting snapshot is stored in
-`shared_reference_contribution_revisions.envelope_json` and returned verbatim
-by `public.search_public_reference_contributions` and
-`public.get_public_reference_contribution`, both granted to `anon`. That
-envelope is bounded only by jsonb type and size and carries no
-`schema_version` CHECK. Sharing an enhanced measurement set therefore
-publishes a version-2 snapshot on a route the desktop gate does not see, so
-the shared-contribution path needs its own version decision before snapshot
-version 2 is enabled in production.
+Shared-reference contributions use the same canonical v2 snapshot builder.
+The deployed public-read wrappers negotiate accepted versions and preserve
+full v2 content for capable readers; unknown snapshot/details versions are
+rejected. Sharing requires no separate client-population rollout decision.
 
 Observation-use pull imports the frozen `snapshot_json` exactly as stored.
 Three-way reconciliation may automatically combine only disjoint role/note
