@@ -1,0 +1,36 @@
+name: CI
+
+# Fast checks for every pull request and for main. No secrets, no Supabase
+# or Cloudflare access: the tests run against the checkout alone.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node-tests:
+    name: Node tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Every tracked *.test.js / *.test.mjs file. The *.test.ts files under
+      # supabase/ are Deno tests for the edge functions, not Node tests.
+      - name: Run tests
+        run: node --test $(git ls-files '*.test.js' '*.test.mjs')
