@@ -4,6 +4,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,6 +24,11 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..');
 const SPORELY_PY = path.resolve(REPO_ROOT, '..', 'sporely-py');
 const BASE_RELEASE = path.join(SPORELY_PY, 'database/reference_data/generated/taxonomy_v2/global_macrofungi_tax-2026.08.01-01');
+// A locally generated (git-ignored) release in the sibling sporely-py
+// checkout; without it the test that verifies it is skipped.
+const baseRelease = existsSync(path.join(BASE_RELEASE, 'taxonomy_export_manifest.json'))
+  ? {}
+  : { skip: 'needs the generated base release in the sibling sporely-py checkout' };
 const SCHEMA_SQL = path.join(REPO_ROOT, 'supabase/drafts/taxonomy_v3_schema.sql');
 const ADDITIVE_SCHEMA = path.join(REPO_ROOT, 'supabase/drafts/taxonomy_v3_schema_additive.sql');
 const ADDITIVE_OBS = path.join(REPO_ROOT, 'supabase/drafts/taxonomy_v3_observations_integration_draft_additive.sql');
@@ -94,7 +100,7 @@ test('verifyManifest recomputes semantic SHA and enforces record/count/state inv
   assert.throws(() => verifyManifest(JSON.stringify(badUnresolved)), /non-null target/);
 });
 
-test('loadBase verifies every file in taxonomy_export_manifest.json', async () => {
+test('loadBase verifies every file in taxonomy_export_manifest.json', baseRelease, async () => {
   const base = await loadBase(BASE_RELEASE);
   assert.equal(base.release_id, 'tax-2026.08.01-01');
   assert.equal(base.scope_manifest_sha256, '72758b2c574e8aea27432b6b55c62dfb6ad87f3fadc11ad1c892a61abf23ac4e');
