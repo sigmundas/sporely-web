@@ -25,7 +25,7 @@ BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS pgtap WITH SCHEMA extensions;
 
-SELECT plan(38);
+SELECT plan(39);
 
 -- ---------------------------------------------------------------
 -- Fixtures (as postgres).
@@ -70,8 +70,17 @@ WITH o AS (
 ) INSERT INTO fx SELECT 'obs_bad', id FROM o;
 
 -- Trusted (postgres, no sub) insert of the malformed row: user_id equals the
--- observation owner A, key under V's prefix. The write guards trust this
--- role; the read-time check must still deny it.
+-- observation owner A, key under V's prefix. Since 20261020120000 the
+-- media-key guard refuses it for every role (asserted next), so the legacy
+-- row is planted with that one trigger disabled; the read-time check must
+-- still deny it.
+SELECT throws_ok(
+  $$INSERT INTO public.spore_measurement_mosaics
+      (observation_id, user_id, storage_key, width_px, height_px, tile_size_px, version)
+    VALUES ((SELECT v FROM fx WHERE k = 'obs_bad'), '00000000-0000-4000-8000-00000000d0a1',
+            '00000000-0000-4000-8000-00000000d0b2/victim-obs/spore_mosaic_v1_deadbeef.webp', 256, 128, 64, 1)$$,
+  '42501', NULL, 'media-key guard refuses a trusted foreign-prefix mosaic key');
+ALTER TABLE public.spore_measurement_mosaics DISABLE TRIGGER zzy_media_key_retirement_guard;
 WITH m AS (
   INSERT INTO public.spore_measurement_mosaics
     (observation_id, user_id, storage_key, width_px, height_px, tile_size_px, version)
@@ -80,6 +89,7 @@ WITH m AS (
           256, 128, 64, 1)
   RETURNING id
 ) INSERT INTO fx SELECT 'mosaic_bad', id FROM m;
+ALTER TABLE public.spore_measurement_mosaics ENABLE ALWAYS TRIGGER zzy_media_key_retirement_guard;
 
 SELECT is(
   (SELECT attidentity::text FROM pg_attribute

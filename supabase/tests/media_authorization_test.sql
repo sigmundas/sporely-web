@@ -1291,6 +1291,19 @@ BEGIN
     VALUES (victim_obs, owner_id, owner_id::text||'/mismatch.webp')
     RETURNING id INTO bad_owner_img;
 
+    -- Malformed legacy rows (keys outside the owner namespace). Since
+    -- 20261020120000 the media-key guard refuses such writes for every role,
+    -- so they are planted with that one trigger disabled, as rows written
+    -- before the guard existed; the read-side checks below still apply.
+    BEGIN
+      INSERT INTO public.observation_images (observation_id, user_id, storage_path)
+      VALUES (victim_obs, victim_id, 'foreign/ns.webp');
+      fail_msgs := array_append(fail_msgs, 'guard accepted a foreign-namespace storage_path');
+    EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+    RESET ROLE;
+    ALTER TABLE public.observation_images DISABLE TRIGGER zzy_media_key_retirement_guard;
+    SET LOCAL ROLE service_role;
+
     -- Malformed row: storage_path outside the owner namespace.
     INSERT INTO public.observation_images
       (observation_id, user_id, storage_path)
@@ -1302,6 +1315,9 @@ BEGIN
       (observation_id, user_id, storage_path, original_storage_path)
     VALUES (victim_obs, victim_id, victim_id::text||'/legit.webp', 'foreign/orig.webp')
     RETURNING id INTO bad_orig_ns_img;
+    RESET ROLE;
+    ALTER TABLE public.observation_images ENABLE ALWAYS TRIGGER zzy_media_key_retirement_guard;
+    SET LOCAL ROLE service_role;
 
     -- N1: RPC denies owner-mismatched row with reason 'owner_mismatch'.
     FOR decision IN

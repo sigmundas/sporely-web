@@ -89,7 +89,7 @@ BEGIN
     sample_type, sample_source, mount_medium, contrast
   )
   VALUES (
-    legacy_obs_id, sample_user_id, 'sample-source/legacy.webp', 'microscope',
+    legacy_obs_id, sample_user_id, sample_user_id::text || '/sample-source/legacy.webp', 'microscope',
     'Spore print', NULL, 'water', 'brightfield'
   )
   RETURNING id INTO legacy_image_id;

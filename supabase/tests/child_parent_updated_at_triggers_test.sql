@@ -45,7 +45,7 @@ BEGIN
   INSERT INTO public.observation_images (
     observation_id, user_id, storage_path, image_type, notes
   ) VALUES (
-    parent_a, fixture_user, 'trigger-test/image-a.jpg', 'field', 'insert'
+    parent_a, fixture_user, fixture_user::text || '/trigger-test/image-a.jpg', 'field', 'insert'
   ) RETURNING id INTO image_a;
   SELECT updated_at INTO actual_timestamp FROM public.observations WHERE id = parent_a;
   IF actual_timestamp <= old_timestamp THEN
@@ -95,12 +95,12 @@ BEGIN
   INSERT INTO public.observation_images (
     observation_id, user_id, storage_path, image_type, notes
   ) VALUES (
-    parent_a, fixture_user, 'trigger-test/measurement-a.jpg', 'field', 'measurement parent A'
+    parent_a, fixture_user, fixture_user::text || '/trigger-test/measurement-a.jpg', 'field', 'measurement parent A'
   ) RETURNING id INTO image_a;
   INSERT INTO public.observation_images (
     observation_id, user_id, storage_path, image_type, notes
   ) VALUES (
-    parent_b, fixture_user, 'trigger-test/measurement-b.jpg', 'field', 'measurement parent B'
+    parent_b, fixture_user, fixture_user::text || '/trigger-test/measurement-b.jpg', 'field', 'measurement parent B'
   ) RETURNING id INTO image_b;
 
   ALTER TABLE public.observations DISABLE TRIGGER trg_observations_updated_at;

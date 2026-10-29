@@ -222,25 +222,25 @@ VALUES ('00000000-0000-4000-8000-00000005a003', '2026-10-16', now(), 'external_u
 -- Images on o1 (u1). All created before the cutoff unless noted.
 WITH x AS (INSERT INTO public.observation_images
   (observation_id, user_id, image_type, storage_path, original_filename, stored_bytes, desktop_id, created_at)
-  VALUES ((SELECT v FROM fx WHERE k = 'o1'), '00000000-0000-4000-8000-00000005a002', 'field', 'p/i1.webp', 'a.jpg', 100, 1, '2026-01-01')
+  VALUES ((SELECT v FROM fx WHERE k = 'o1'), '00000000-0000-4000-8000-00000005a002', 'field', '00000000-0000-4000-8000-00000005a002/p/i1.webp', 'a.jpg', 100, 1, '2026-01-01')
   RETURNING id)
 INSERT INTO fx SELECT 'i1', id FROM x;
 WITH x AS (INSERT INTO public.observation_images
   (observation_id, user_id, image_type, storage_path, original_filename, desktop_id, sync_key, created_at)
-  VALUES ((SELECT v FROM fx WHERE k = 'o1'), '00000000-0000-4000-8000-00000005a002', 'field', 'p/i2.webp', 'a.jpg', 2, gen_random_uuid(), '2026-01-01')
+  VALUES ((SELECT v FROM fx WHERE k = 'o1'), '00000000-0000-4000-8000-00000005a002', 'field', '00000000-0000-4000-8000-00000005a002/p/i2.webp', 'a.jpg', 2, gen_random_uuid(), '2026-01-01')
   RETURNING id)
 INSERT INTO fx SELECT 'i2', id FROM x;
 
 INSERT INTO public.observation_images (observation_id, user_id, image_type, storage_path, original_filename, sync_key, deleted_at, purged_at, created_at)
 SELECT (SELECT v FROM fx WHERE k = 'o1'), '00000000-0000-4000-8000-00000005a002', t.image_type, t.path, t.fname, t.key, t.deleted_at, t.purged_at, t.created_at
   FROM (VALUES
-    ('microscope', 'p/i3.webp', 'b.jpg', gen_random_uuid(), now(), NULL::timestamptz, '2026-01-01'::timestamptz),  -- i3 keyed, deleted
-    ('microscope', 'p/i4.webp', 'b.jpg', NULL::uuid, NULL, NULL, '2026-10-13 00:00:00+00'),                         -- i4 keyless, exactly at cutoff
-    ('field', 'p/i5.webp', '  ', NULL, NULL, NULL, '2026-10-12 23:59:59.999999+00'),                                -- i5 keyless blank name, just before cutoff
-    ('field', 'p/i6.webp', '  ', gen_random_uuid(), NULL, NULL, '2026-01-01'),                                      -- i6 keyed blank name
+    ('microscope', '00000000-0000-4000-8000-00000005a002/p/i3.webp', 'b.jpg', gen_random_uuid(), now(), NULL::timestamptz, '2026-01-01'::timestamptz),  -- i3 keyed, deleted
+    ('microscope', '00000000-0000-4000-8000-00000005a002/p/i4.webp', 'b.jpg', NULL::uuid, NULL, NULL, '2026-10-13 00:00:00+00'),                         -- i4 keyless, exactly at cutoff
+    ('field', '00000000-0000-4000-8000-00000005a002/p/i5.webp', '  ', NULL, NULL, NULL, '2026-10-12 23:59:59.999999+00'),                                -- i5 keyless blank name, just before cutoff
+    ('field', '00000000-0000-4000-8000-00000005a002/p/i6.webp', '  ', gen_random_uuid(), NULL, NULL, '2026-01-01'),                                      -- i6 keyed blank name
     ('microscope', NULL, 'anchor.jpg', NULL, NULL, NULL, '2026-01-01'),                                             -- i7 pathless anchor
-    ('field', 'p/i9.webp', 'd.jpg', NULL, now(), now(), '2026-01-01'),                                              -- i9 keyless, purged
-    ('field', 'p/i9b.webp', 'd.jpg', gen_random_uuid(), NULL, NULL, '2026-01-01')                                   -- i9b keyed twin of a purged row only
+    ('field', '00000000-0000-4000-8000-00000005a002/p/i9.webp', 'd.jpg', NULL, now(), now(), '2026-01-01'),                                              -- i9 keyless, purged
+    ('field', '00000000-0000-4000-8000-00000005a002/p/i9b.webp', 'd.jpg', gen_random_uuid(), NULL, NULL, '2026-01-01')                                   -- i9b keyed twin of a purged row only
   ) AS t(image_type, path, fname, key, deleted_at, purged_at, created_at);
 
 -- i8: keyed, bytes recorded but no path.
@@ -249,17 +249,17 @@ VALUES ((SELECT v FROM fx WHERE k = 'o1'), '00000000-0000-4000-8000-00000005a002
 
 -- On o4: one twin group with 1 keyed + 11 keyless rows (12 ids), and 50 more twin groups.
 INSERT INTO public.observation_images (observation_id, user_id, image_type, storage_path, original_filename, sync_key, created_at)
-SELECT (SELECT v FROM fx WHERE k = 'o4'), '00000000-0000-4000-8000-00000005a002', 'field', 'p/c' || g || '.webp', 'c.jpg',
+SELECT (SELECT v FROM fx WHERE k = 'o4'), '00000000-0000-4000-8000-00000005a002', 'field', '00000000-0000-4000-8000-00000005a002/p/c' || g || '.webp', 'c.jpg',
        CASE WHEN g = 1 THEN gen_random_uuid() END, '2026-01-01'
   FROM generate_series(1, 12) g;
 INSERT INTO public.observation_images (observation_id, user_id, image_type, storage_path, original_filename, sync_key, created_at)
-SELECT (SELECT v FROM fx WHERE k = 'o4'), '00000000-0000-4000-8000-00000005a002', 'field', 'p/g' || g || '-' || s || '.webp',
+SELECT (SELECT v FROM fx WHERE k = 'o4'), '00000000-0000-4000-8000-00000005a002', 'field', '00000000-0000-4000-8000-00000005a002/p/g' || g || '-' || s || '.webp',
        'g' || lpad(g::text, 2, '0') || '.jpg', CASE WHEN s = 1 THEN gen_random_uuid() END, '2026-01-01'
   FROM generate_series(1, 50) g, generate_series(1, 2) s;
 
 -- On o2: two live images sharing one sync_key (needs the dropped index).
 INSERT INTO public.observation_images (observation_id, user_id, image_type, storage_path, sync_key, created_at)
-SELECT (SELECT v FROM fx WHERE k = 'o2'), '00000000-0000-4000-8000-00000005a002', 'field', 'p/s' || g || '.webp',
+SELECT (SELECT v FROM fx WHERE k = 'o2'), '00000000-0000-4000-8000-00000005a002', 'field', '00000000-0000-4000-8000-00000005a002/p/s' || g || '.webp',
        '00000000-0000-4000-8000-0000005a4ed1', '2026-01-01'
   FROM generate_series(1, 2) g;
 
@@ -275,7 +275,7 @@ INSERT INTO public.spore_measurements (image_id, user_id, length_um, width_um, s
 SELECT i.id, i.user_id, 20.0, 9.0, k.key, k.did, now()
   FROM public.observation_images i,
        (VALUES (NULL::uuid, NULL::integer), (gen_random_uuid(), 21)) AS k(key, did)
- WHERE i.storage_path = 'p/i3.webp';
+ WHERE i.storage_path = '00000000-0000-4000-8000-00000005a002/p/i3.webp';
 
 -- Repair runs: 6 taxon identity runs (5 listed), 1 retired-resolution run.
 INSERT INTO private.taxon_identity_repair_runs (release_id, plan_sha256, candidate_count, promoted_count, outcome_counts, applied_at)
