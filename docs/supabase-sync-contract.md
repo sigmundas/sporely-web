@@ -180,6 +180,27 @@ Plain English comes first; technical terms are in parentheses.
     concept binds once the cloud release contains it; the refusal itself
     writes nothing.
 
+    **A cloud identity received on pull is kept, never proven by itself.** The
+    server guarantees only that `selected_sporely_taxon_id` was in the active
+    release when it was written; it records no producer and no release, and
+    pre-Stage-2 desktops asserted unproven integers through the same RPC. A
+    desktop therefore stores a pulled Sporely ID as `sporely_v2` with proof
+    `cloud_selected_unverified` — only when its installed taxonomy artifact
+    contains the concept, with the artifact's canonical name/rank as the
+    snapshot and provenance naming the cloud and the local release. That
+    proof is outside the proven set: the value is displayed, restored and
+    preserved across saves, but never re-asserted through the RPC and never
+    used by identity-gated lookups (Red List, reference attachment). An
+    explicit picker selection replaces it with `taxonomy_v2_artifact`.
+    **Exception — the desktop re-derives it.** When the cloud row also records
+    the non-Sporely provider tuple that produced the selection (a web/Android
+    client resolved `NBIC:57217` and wrote `nortaxa/nortaxa_taxon_id/57217`
+    beside the selected ID), and the installed artifact's authoritative
+    resolver maps that tuple to the same concept, the desktop stores it as
+    `external_id_resolution` with that tuple — the identity a desktop copy of
+    the identifier produces. A tuple that resolves to nothing or to another
+    concept, or a `sporely`-namespace tuple, leaves `cloud_selected_unverified`.
+
     **The persistence API accepts one complete typed identity transition.**
     The identity spans several columns but is a single value, and treating
     those columns as independently writable produces rows that contradict
