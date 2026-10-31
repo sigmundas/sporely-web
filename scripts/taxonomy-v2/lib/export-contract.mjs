@@ -53,13 +53,17 @@ function validateNationalNames(file, line, value) {
 // database/taxonomy/docs/cloud-export-contract.md, "Dyntaxa rows"). A Dyntaxa
 // identifier is published only as a reviewed bridge: namespace
 // dyntaxa_taxon_id, the full Taxon LSID, accepted, not preferred, and an
-// authoritative_bridge note. Anything else (another Dyntaxa namespace, a
-// synonym TaxonName LSID, a bare number, an automatic match, a legacy integer
-// row) or an LSID on two concepts is refused, so nothing unreviewed or
-// ambiguous can ever resolve through resolve_taxon_external_id_v2.
+// authoritative_bridge note — or, since the name-association policy
+// (sporely-py database/taxonomy/policies/name_association_policy.json), a
+// name_association note for a release association. Anything else (another
+// Dyntaxa namespace, a synonym TaxonName LSID, a bare number, an unlabelled
+// automatic match, a legacy integer row) or an LSID on two concepts is refused,
+// so nothing unlabelled or ambiguous can ever resolve through
+// resolve_taxon_external_id_v2.
 export const DYNTAXA_SOURCE_SYSTEM = 'dyntaxa';
 export const DYNTAXA_NAMESPACE = 'dyntaxa_taxon_id';
 export const DYNTAXA_TAXON_LSID_RE = /^urn:lsid:dyntaxa\.se:Taxon:[1-9][0-9]*$/;
+export const DYNTAXA_NOTE_PREFIXES = ['authoritative_bridge:', 'name_association:'];
 
 const isDyntaxaRow = row => row.source_system === DYNTAXA_SOURCE_SYSTEM || String(row.namespace ?? '').startsWith('dyntaxa');
 
@@ -74,7 +78,7 @@ export function createDyntaxaRowCollector() {
       if (row.source_system !== DYNTAXA_SOURCE_SYSTEM || row.namespace !== DYNTAXA_NAMESPACE) throw new Error(`${where}: Dyntaxa row must be ${DYNTAXA_SOURCE_SYSTEM}/${DYNTAXA_NAMESPACE}`);
       if (!DYNTAXA_TAXON_LSID_RE.test(row.external_id)) throw new Error(`${where}: Dyntaxa external_id must be a urn:lsid:dyntaxa.se:Taxon:<n> LSID`);
       if (row.id_role !== 'accepted' || row.is_preferred !== false) throw new Error(`${where}: Dyntaxa row must be accepted and not preferred`);
-      if (typeof row.note !== 'string' || !row.note.startsWith('authoritative_bridge:')) throw new Error(`${where}: Dyntaxa row is not an authoritative reviewed bridge`);
+      if (typeof row.note !== 'string' || !DYNTAXA_NOTE_PREFIXES.some(prefix => row.note.startsWith(prefix))) throw new Error(`${where}: Dyntaxa row is not an authoritative reviewed bridge or name association`);
       if (typeof row.external_name !== 'string' || !row.external_name.trim()) throw new Error(`${where}: Dyntaxa row has no accepted name`);
       const taxon = lsidToTaxon.get(row.external_id);
       if (taxon !== undefined && taxon !== row.taxon_id) throw new Error(`${where}: Dyntaxa ${row.external_id} is ambiguous across concepts`);

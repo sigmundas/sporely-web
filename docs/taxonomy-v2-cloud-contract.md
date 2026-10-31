@@ -470,9 +470,9 @@ scientific names", accepted candidate `f3e8211`). Migration
   so pre-3P exports still load) and refuses partial provenance. Before a
   release becomes `ready`, `taxonomy_v2_national_name_errors(release_id)`
   (service-role only) must be empty: every name must be traced to an accepted
-  `authoritative_bridge:` row of `taxonomy_v2_external_ids` with the same
-  concept, identifier and `external_name`, and be a
-  `taxonomy_v2_scientific_names` row of the concept.
+  `authoritative_bridge:` or `name_association:` row of
+  `taxonomy_v2_external_ids` with the same concept, identifier and
+  `external_name`, and be a `taxonomy_v2_scientific_names` row of the concept.
 - `search_taxa_v2(q, lang, lim)` keeps its arguments, existing columns,
   matching and ranking, and appends `preferred_scientific_name_no`,
   `preferred_scientific_name_sv` and `display_scientific_name`. The last is
@@ -503,7 +503,8 @@ Only reviewed Dyntaxa bridges can reach the resolver. Both importers
 (`import-release.mjs` via `preflightExport`, and
 `prepare-production-release-import.mjs`) refuse an export in which any
 Dyntaxa row is not `dyntaxa/dyntaxa_taxon_id`, is not a full `Taxon:` LSID, is
-not `accepted` and non-preferred, lacks an `authoritative_bridge:` note, sits
+not `accepted` and non-preferred, lacks an `authoritative_bridge:` or
+`name_association:` note, sits
 in the legacy-integer file, names a concept missing from `taxon.jsonl`, maps
 one LSID to two concepts, or gives one concept two Dyntaxa identities. If an
 ambiguous tuple were ever present, the web client still leaves it
@@ -521,3 +522,30 @@ and a concept without one (617026) shows canonical COL. Regressions:
 `supabase/tests/taxonomy_v2_dyntaxa_test.sql`, `src/taxonomy-v2.test.js`
 (Stage 4W), `scripts/taxonomy-v2/export-contract.test.mjs`,
 `scripts/taxonomy-v2/production-release-import.test.mjs`.
+
+## Name associations (sporely-py candidate `tax-2026.10.31-01`)
+
+The owner's product decision of 2026-10-31 is to merge by default when
+scientific names match. sporely-py derives, per release, an association from
+a NorTaxa or Dyntaxa Fungi usage to the live concept with the same canonical
+name and rank (or a unique synonym bridge), preferring the COL-backed concept
+(`database/taxonomy/policies/name_association_policy.json`,
+`scripts/name_associations.py`). No Sporely id is allocated, retired or
+renumbered. The association's ids, names, vernaculars and Red List rows are
+projected onto the primary concept, so the cloud receives them as ordinary
+rows of that concept:
+
+- `taxonomy_v2_external_ids` rows with note `name_association:<rule>`
+  (`exact_accepted_name`, `unique_synonym_bridge`, `own_source_synonym`) for
+  `nortaxa/nortaxa_taxon_id` (accepted and synonym) and
+  `dyntaxa/dyntaxa_taxon_id` (accepted). `resolve_taxon_external_id_v2` is
+  unchanged and resolves them like any namespaced id.
+- National preferred names may cite such a row
+  (`20261031120000_accept_name_association_national_names.sql`); the
+  importer's Dyntaxa check accepts the note too. Every other rule above is
+  unchanged: one Dyntaxa identity per concept, no LSID on two concepts.
+
+Older clients need no change: they read the same columns and RPCs. The
+association table itself stays in the desktop SQLite; the cloud release only
+holds primary concepts.
+
