@@ -198,8 +198,12 @@ Plain English comes first; technical terms are in parentheses.
     beside the selected ID), and the installed artifact's authoritative
     resolver maps that tuple to the same concept, the desktop stores it as
     `external_id_resolution` with that tuple — the identity a desktop copy of
-    the identifier produces. A tuple that resolves to nothing or to another
-    concept, or a `sporely`-namespace tuple, leaves `cloud_selected_unverified`.
+    the identifier produces. When the installed release presents the selected
+    concept as another one through a name association (`taxon_association_min`
+    member → primary), a tuple resolving to that primary also proves it; the
+    cloud's own selected ID is kept, never replaced by the primary. A tuple
+    that resolves to nothing or to an unrelated concept, or a
+    `sporely`-namespace tuple, leaves `cloud_selected_unverified`.
 
     **The persistence API accepts one complete typed identity transition.**
     The identity spans several columns but is a single value, and treating
