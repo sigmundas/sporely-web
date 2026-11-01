@@ -308,3 +308,66 @@ test('MEDIA_CACHE_MAX_TOTAL_BYTES defaults to 64 MiB / entry cap 5 MiB', () => {
   assert.equal(MEDIA_CACHE_MAX_TOTAL_BYTES, 64 * 1024 * 1024)
   assert.equal(MEDIA_CACHE_MAX_ENTRY_BYTES, 5 * 1024 * 1024)
 })
+
+// WebKit (iOS home-screen web app) returns IndexedDB-stored Blobs whose
+// object URLs fail to load, so the cache stores raw bytes and rebuilds a
+// fresh Blob on every read.
+test('writes store image bytes as an ArrayBuffer, never a Blob', async () => {
+  const backend = memBackend()
+  const source = new Blob([new Uint8Array([1, 2, 3, 4])], { type: 'image/webp' })
+  assert.equal(await writeCachedMedia(publicIdentity(), source, { backend }), true)
+
+  const stored = backend.map.get(buildMediaCacheKey(publicIdentity()))
+  assert.ok(stored.bytes instanceof ArrayBuffer)
+  assert.equal('blob' in stored, false)
+
+  const read = await readCachedMedia(publicIdentity(), { backend })
+  assert.ok(read.blob instanceof Blob)
+  assert.notEqual(read.blob, source)
+  assert.equal(read.blob.type, 'image/webp')
+  assert.deepEqual([...new Uint8Array(await read.blob.arrayBuffer())], [1, 2, 3, 4])
+})
+
+const legacyRecord = (blob) => ({
+  version: MEDIA_CACHE_SCHEMA_VERSION,
+  cacheKey: buildMediaCacheKey(publicIdentity()),
+  userId: USER_A,
+  mediaKind: 'observation-thumb',
+  privacyScope: 'public',
+  mediaKey: 'obs-1/img.jpg',
+  variant: 'thumb',
+  contentType: 'image/webp',
+  sizeBytes: blob.size,
+  createdAt: 1,
+  updatedAt: 1,
+  lastAccessedAt: 1,
+  blob,
+})
+
+test('a legacy Blob record is converted to bytes on read', async () => {
+  const backend = memBackend()
+  const key = buildMediaCacheKey(publicIdentity())
+  backend.map.set(key, legacyRecord(new Blob([new Uint8Array([9, 8, 7])], { type: 'image/webp' })))
+
+  const read = await readCachedMedia(publicIdentity(), { backend })
+  assert.ok(read.blob instanceof Blob)
+  assert.equal(read.blob.type, 'image/webp')
+  assert.deepEqual([...new Uint8Array(await read.blob.arrayBuffer())], [9, 8, 7])
+
+  const migrated = backend.map.get(key)
+  assert.ok(migrated.bytes instanceof ArrayBuffer)
+  assert.equal('blob' in migrated, false)
+})
+
+test('a legacy Blob record that can no longer be read is evicted as a miss', async () => {
+  const backend = memBackend()
+  const key = buildMediaCacheKey(publicIdentity())
+  backend.map.set(key, legacyRecord({
+    size: 3,
+    type: 'image/webp',
+    async arrayBuffer() { throw new Error('WebKitBlobResource error 1') },
+  }))
+
+  assert.equal(await readCachedMedia(publicIdentity(), { backend }), null)
+  assert.equal(backend.map.has(key), false)
+})

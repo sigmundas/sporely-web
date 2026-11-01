@@ -24,8 +24,15 @@
 //         createdAt:      <ms>,
 //         updatedAt:      <ms>,
 //         lastAccessedAt: <ms>,
-//         blob:           <Blob>
+//         bytes:          <ArrayBuffer>
 //       }
+//   * Image bytes are stored as an ArrayBuffer, never as a Blob. WebKit (iOS
+//     Safari, notably the installed home-screen web app) hands back Blobs
+//     read from IndexedDB whose object URLs fail to load, so every cached
+//     thumbnail rendered as a broken image. Reads rebuild a fresh in-memory
+//     Blob from the bytes. Records written before this change carry a
+//     `blob` field instead; a read converts them to `bytes` and drops the
+//     record when the stored Blob can no longer be read.
 //
 // PRIVACY / FAIL-CLOSED
 //   * userId is mandatory on every read/write. A missing userId => null / false.
@@ -199,10 +206,14 @@ function _isBlobLike(value) {
   return typeof value.size === 'number' && typeof value.type === 'string'
 }
 
+function _isArrayBuffer(value) {
+  return value instanceof ArrayBuffer
+}
+
 function _validateRecord(record, expectedUserId, expectedCacheKey) {
   if (!record || typeof record !== 'object') return null
   if (record.version !== SCHEMA_VERSION) return null
-  if (!_isBlobLike(record.blob)) return null
+  if (!_isArrayBuffer(record.bytes) && !_isBlobLike(record.blob)) return null
   if (!_safe(record.userId)) return null
   if (expectedUserId && record.userId !== expectedUserId) return null
   if (expectedCacheKey && record.cacheKey !== expectedCacheKey) return null
@@ -231,8 +242,20 @@ export async function readCachedMedia(identity, { backend = _idbBackend, now = D
   catch { return null }
   const valid = _validateRecord(record, uid, cacheKey)
   if (!valid) return null
+  let bytes = valid.bytes
+  if (!_isArrayBuffer(bytes)) {
+    // Legacy Blob record: read its bytes once and store them as `bytes`.
+    try { bytes = await valid.blob.arrayBuffer() }
+    catch { bytes = null }
+    if (!_isArrayBuffer(bytes) || bytes.byteLength <= 0) {
+      try { await backend.delete(cacheKey) } catch { /* ignore */ }
+      return null
+    }
+  }
+  const contentType = String(valid.contentType || valid.blob?.type || '').toLowerCase()
   // Best-effort LRU touch. A touch failure never fails the read.
-  const touched = { ...valid, lastAccessedAt: now() }
+  const touched = { ...valid, bytes, lastAccessedAt: now() }
+  delete touched.blob
   try { await backend.put(touched) } catch { /* ignore */ }
   return {
     userId: valid.userId,
@@ -245,7 +268,7 @@ export async function readCachedMedia(identity, { backend = _idbBackend, now = D
     createdAt: valid.createdAt,
     updatedAt: valid.updatedAt,
     lastAccessedAt: touched.lastAccessedAt,
-    blob: valid.blob,
+    blob: new Blob([bytes], { type: contentType }),
   }
 }
 
@@ -268,6 +291,10 @@ export async function writeCachedMedia(identity, blob, {
   if (size > maxEntryBytes) return false
   const contentType = String(blob.type || '').toLowerCase()
   if (!_isImageContentType(contentType)) return false
+  let bytes
+  try { bytes = await blob.arrayBuffer() }
+  catch { return false }
+  if (!_isArrayBuffer(bytes) || bytes.byteLength <= 0) return false
 
   const nowMs = now()
   const record = {
@@ -283,7 +310,7 @@ export async function writeCachedMedia(identity, blob, {
     createdAt: nowMs,
     updatedAt: nowMs,
     lastAccessedAt: nowMs,
-    blob,
+    bytes,
   }
 
   // Pre-emptive LRU: evict older entries to make room for the incoming record
