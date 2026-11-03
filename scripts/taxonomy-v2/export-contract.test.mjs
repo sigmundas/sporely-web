@@ -55,6 +55,7 @@ async function withExternalRows(file, extra, check) {
     await check(r);
   } finally { await rm(r, { recursive: true }); }
 }
+test('Dyntaxa name-association row passes preflight', async()=>{ await withExternalRows('taxon_external_id.jsonl',[{...dyntaxaBridge,note:'name_association:exact_accepted_name'}],async r=>{ await preflightExport(r); }); });
 test('Stage 4P reviewed Dyntaxa bridge row passes preflight', async()=>{ await withExternalRows('taxon_external_id.jsonl',[dyntaxaBridge,{...dyntaxaBridge,external_id:'urn:lsid:dyntaxa.se:Taxon:3957',taxon_id:3}],async r=>{ await preflightExport(r); }); });
 for (const [label, row, pattern] of [
   ['automatic (non-bridge) Dyntaxa row', { ...dyntaxaBridge, note: null }, /not an authoritative reviewed bridge/],
