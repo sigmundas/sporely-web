@@ -729,9 +729,10 @@ flight. Every session write (sign-in, a saved refresh, sign-out) starts a new
 session generation, and a refresh saves its rotated tokens only if the
 generation has not changed since it read the stored session. After a sign-out
 or a sign-in to another account the refreshing client stops; a newer session of
-the same account is adopted instead of overwritten. A client created before a
-sign-out never refreshes afterwards: with no stored session, the profile is
-signed out.
+the same account is adopted instead of overwritten. A client loaded from the
+stored session before a sign-out never refreshes afterwards: with no stored
+session, the profile is signed out. A fresh sign-in whose credentials are not
+saved yet may still refresh.
 
 ## Keep image decisions explicit
 
