@@ -732,7 +732,10 @@ or a sign-in to another account the refreshing client stops; a newer session of
 the same account is adopted instead of overwritten. A client loaded from the
 stored session before a sign-out never refreshes afterwards: with no stored
 session, the profile is signed out. A fresh sign-in whose credentials are not
-saved yet may still refresh.
+saved yet may still refresh. Loading a client from a stored refresh token alone
+refreshes under the same lock as every other refresh, so two loaders never
+spend one refresh token: a loader that waited loads the session written
+meanwhile instead.
 
 ## Keep image decisions explicit
 
