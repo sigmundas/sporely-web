@@ -279,6 +279,56 @@ namespace, raw external ID, source release or response time, selection time,
 resolution state, and original selected result. Historical display must not
 depend on an external API or cache entry remaining available.
 
+## Retired release retention
+
+Production keeps the active release and the immediately previous release (the
+retired release activated most recently), as the integration plan's retention
+policy requires. Older retired releases have their payload removed so the next
+release fits under the Free 500 MB quota. The admin database-health warning
+`retired_taxonomy_payload_resident` reports retired payload still stored.
+
+`scripts/taxonomy-v2/prepare-release-purge.mjs` writes a guarded psql file
+outside Git; it touches no database itself. Running that file is a production
+write and needs explicit approval for the named release.
+
+```sh
+npm run taxonomy:v2:prepare-purge -- \
+  --release-id tax-YYYY.MM.DD-NN --output /private/dir/purge-tax-YYYY.MM.DD-NN.sql
+```
+
+Add `--allow-previous` only when the previous release (the rollback target)
+is to go as well. Run the file with the containerised `psql` command the script
+prints. In one transaction the file:
+
+- takes the import and activation advisory locks without waiting, and refuses
+  if either is held;
+- refuses unless the release exists and is `retired`, exactly one release is
+  `active`, no release is `loading`/`ready`, no import run is `running`, and
+  the release is not the previous release (unless allowed);
+- refuses if the set of public tables with a `release_id` column differs from
+  the six payload tables plus `taxonomy_v2_releases` and
+  `taxonomy_v2_import_runs`, so a new payload table is never left behind;
+- deletes the release's rows from the payload tables, checks none remain, and
+  commits.
+
+It then runs `VACUUM (FULL, ANALYZE)` on each payload table. Deleting rows
+alone does not shrink the database. Each rebuild holds an ACCESS EXCLUSIVE lock
+for a few seconds and gives up after a 5 s lock wait; rerun the same file to
+finish. The header and import-run rows stay, so the release remains recorded
+as `retired`. The production importer refuses any release whose header
+exists, so bringing a purged release back is a manual recovery: remove its
+header and audit rows, then re-import it from its frozen export. No view,
+function, or observation reads a retired release's payload: observations
+reference `taxonomy_v2_concepts`, and search and resolution read the active
+release.
+
+On 2026-11-18, with approval, the payload of `tax-2026.10.07-01` and
+`tax-2026.10.23-11` was removed by equivalent manual SQL and the payload
+tables were rebuilt. The cluster went from 381 MB to 220 MB; the active
+`tax-2026.10.31-01` validated and searched normally afterwards. Releases
+`tax-2026.08.01-01`, `tax-2026.09.26-02` and `tax-2026.09.30-01` had already
+been removed earlier.
+
 ## W2C sparse-registry prototype result
 
 The accepted Phase-A `tax-2026.08.01-01` preload is experimental and
