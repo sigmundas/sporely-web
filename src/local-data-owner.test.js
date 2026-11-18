@@ -198,3 +198,20 @@ test('a superseded resolution neither purges nor claims the marker', async () =>
   assert.equal(result2.outcome, 'stale')
   assert.equal(getLocalDataOwner(storage), 'user-a')
 })
+
+test('a superseded resolution whose purge fails reports stale, not purge_failed', async () => {
+  const { resolveLocalDataOwner, setLocalDataOwner } = await import('./local-data-owner.js')
+  const store = new Map()
+  const storage = {
+    getItem: key => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => { store.set(key, String(value)) },
+    removeItem: key => { store.delete(key) },
+  }
+  setLocalDataOwner('user-a', storage)
+  let current = true
+  const result = await resolveLocalDataOwner('user-b', async () => {
+    current = false // a newer sign-in replaced B while the purge ran
+    throw new Error('IDB write failed')
+  }, { storage, isCurrent: () => current })
+  assert.equal(result.outcome, 'stale', 'the caller must not treat a superseded sign-in as its own failure')
+})

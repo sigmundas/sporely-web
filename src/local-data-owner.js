@@ -67,6 +67,7 @@ export async function resolveLocalDataOwner(userId, purgeFn, { storage = _defaul
         if (typeof purgeFn === 'function') await purgeFn()
       } catch (err) {
         console.warn('Legacy pre-marker purge failed; keeping marker unset for retry:', err)
+        if (stale()) return { outcome: 'stale' }
         return { outcome: 'legacy_purge_failed' }
       }
       if (stale()) return { outcome: 'stale' }
@@ -86,6 +87,7 @@ export async function resolveLocalDataOwner(userId, purgeFn, { storage = _defaul
     if (typeof purgeFn === 'function') await purgeFn()
   } catch (err) {
     console.warn('Draft purge on owner mismatch failed; preserving old marker for retry:', err)
+    if (stale()) return { outcome: 'stale' }
     return { outcome: 'purge_failed' }
   }
   if (stale()) return { outcome: 'stale' }
