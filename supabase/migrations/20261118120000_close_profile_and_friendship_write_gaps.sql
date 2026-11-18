@@ -69,6 +69,7 @@ CREATE POLICY "friendships: addressee can accept"
 -- cannot be rewritten (trg_friendships_updated_at still sets updated_at).
 -- anon never had a working friendships path (every policy needs auth.uid()).
 REVOKE ALL ON TABLE public.friendships FROM anon;
+REVOKE ALL ON SEQUENCE public.friendships_id_seq FROM anon;
 REVOKE ALL ON TABLE public.friendships FROM authenticated;
 GRANT SELECT, INSERT, DELETE ON TABLE public.friendships TO authenticated;
 GRANT UPDATE (status) ON TABLE public.friendships TO authenticated;

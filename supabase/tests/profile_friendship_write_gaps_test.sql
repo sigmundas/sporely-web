@@ -34,7 +34,13 @@ BEGIN
     (u_a, 'fw_a', 'A', false, false),
     (u_b, 'fw_b', 'B', false, false),
     (u_c, 'fw_c', 'C', false, false)
-  ON CONFLICT (id) DO UPDATE SET is_admin = false, is_banned = false;
+  -- Production's on_auth_user_created trigger may already have created these
+  -- rows from the email, so reset every column the assertions read.
+  ON CONFLICT (id) DO UPDATE SET
+    username = EXCLUDED.username,
+    display_name = EXCLUDED.display_name,
+    is_admin = false,
+    is_banned = false;
   DELETE FROM public.profiles WHERE id = u_noprof;
   DELETE FROM public.friendships
    WHERE requester_id IN (u_a, u_b, u_c) OR addressee_id IN (u_a, u_b, u_c);
@@ -144,6 +150,20 @@ BEGIN
   END;
   IF NOT v_failed THEN
     RAISE EXCEPTION 'F3: a self friendship request must be refused';
+  END IF;
+
+  -- F3b: an upsert cannot turn the pending request into an accepted one.
+  v_failed := false;
+  BEGIN
+    INSERT INTO public.friendships (requester_id, addressee_id, status)
+    VALUES (u_a, u_b, 'pending')
+    ON CONFLICT (requester_id, addressee_id) DO UPDATE SET status = 'accepted';
+  EXCEPTION WHEN insufficient_privilege THEN
+    v_failed := true;
+  END;
+  SELECT status INTO v_text FROM public.friendships WHERE id = v_req;
+  IF v_text IS DISTINCT FROM 'pending' THEN
+    RAISE EXCEPTION 'F3b: upsert must not accept the request (status=%, refused=%)', v_text, v_failed;
   END IF;
 
   -- F4: the requester cannot accept their own request.
