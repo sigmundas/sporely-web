@@ -70,7 +70,7 @@ import {
 } from './account-transition.js'
 import { initPeople, loadPeople } from './screens/people.js'
 import { initAiCropEditor } from './ai-crop-editor.js'
-import { loadMapScreen } from './map-loader.js'
+import { loadMapScreen, resetMapForAccountTransition } from './map-loader.js'
 import {
   CLOUD_PLAN_SOURCE,
   fetchCloudPlanProfile,
@@ -86,8 +86,11 @@ import { hideSettingsOverlay, showSettingsOverlay } from './settings-overlay.js'
 import { isWebInatOAuthConfigured } from './inaturalist.js'
 import { installIrisShutterDebugControls } from './iris-shutter.js'
 import {
+  blockInaturalistSessionForThisPageLoad,
   connectInaturalist,
   forgetInaturalistSession,
+  hasStoredInaturalistSession,
+  inaturalistLinkEpoch,
   loadInaturalistSession,
   maybeHandleInaturalistOAuthReturn,
 } from './inaturalist.js'
@@ -894,12 +897,69 @@ async function _handleInaturalistOAuthReturn(url) {
   return outcome
 }
 
-// Purges the two privacy-sensitive draft stores. THROWS on failure so the
-// caller can leave the owner marker in place and retry on the next boot.
+// Purges the device data that belongs to one Sporely account but is not
+// keyed by it: the linked iNaturalist session (tokens with write scope) and
+// the two privacy-sensitive draft stores. Runs on explicit sign-out, account
+// switch and a cold-start owner mismatch. THROWS on failure so the caller can
+// leave the owner marker in place and retry on the next boot.
 async function _purgeUserDrafts() {
+  await forgetInaturalistSession()
   await clearImportSessionsStrict()
   await clearReviewDraftStrict()
 }
+
+// Account-scoped device data with no owner marker is treated as unowned and
+// purged before the marker is assigned. That covers drafts from before
+// ownership tracking, and an iNaturalist session left by an account that
+// signed out before the purge included it.
+async function _hasUnownedLocalData() {
+  try {
+    if (await hasStoredInaturalistSession()) return true
+  } catch {
+    // An unreadable credential store may still hold another account's
+    // session: treat it as unowned so the purge runs (or fails closed).
+    return true
+  }
+  try {
+    const sessions = await loadImportSessions()
+    if (sessions.length > 0) return true
+    const draft = await loadReviewDraft()
+    return draft != null
+  } catch { return false }
+}
+
+// Resolves which account owns this device's local data, purging another
+// account's data on mismatch. Each resolution carries a token; a newer
+// sign-in, an account switch or a sign-out invalidates it, so an older
+// resolution can never purge or claim data for the account that replaced it.
+// If the purge fails, the stored iNaturalist session stays unreadable for
+// this page load unless the user links a new one meanwhile.
+let _ownershipReady = null
+let _ownershipToken = 0
+
+function _invalidatePendingOwnership() {
+  _ownershipToken += 1
+}
+
+async function _resolveLocalOwnershipForBoot(user) {
+  const token = ++_ownershipToken
+  const linkEpoch = inaturalistLinkEpoch()
+  let result
+  try {
+    result = await resolveLocalDataOwner(user.id, _purgeUserDrafts, {
+      hasLegacyData: _hasUnownedLocalData,
+      isCurrent: () => token === _ownershipToken,
+    })
+  } catch (err) {
+    console.warn('[boot] Ownership resolution failed:', _safeErrorCode(err))
+    result = { outcome: 'purge_failed' }
+  }
+  if (result.outcome === 'purge_failed' || result.outcome === 'legacy_purge_failed') {
+    blockInaturalistSessionForThisPageLoad({ unlessLinkedSince: linkEpoch })
+  }
+  return result
+}
+
 
 async function _clearInMemoryUserState() {
   // In-memory media URL cache (Supabase signed URLs).
@@ -1118,6 +1178,7 @@ async function _resolveAndRouteForUser(user) {
   // BEFORE any await runs. Neither the browser paint pipeline nor a late
   // account-A response can leak stale DOM after this point.
   clearUserScopedUi()
+  resetMapForAccountTransition()
   showAccountTransitionBlocker()
   setAuthState({ state: AUTH_STATE.RESOLVING, userId: expectedUserId })
   showAuthOverlay()
@@ -1436,8 +1497,15 @@ async function _ensureAppReadyForUser(user) {
   if (previousUserId && previousUserId !== user.id) {
     // Account switch. Purge drafts BEFORE moving the owner marker; if the
     // purge throws, the marker stays with the previous user so the next
-    // cold-start ownership check retries it.
-    await _purgeUserDrafts()
+    // cold-start ownership check retries it, and the previous user's
+    // iNaturalist session stays unreadable meanwhile.
+    _invalidatePendingOwnership()
+    try {
+      await _purgeUserDrafts()
+    } catch (err) {
+      blockInaturalistSessionForThisPageLoad()
+      throw err
+    }
     // Stage B2a: the previous user's Home cache follows the existing purge
     // semantics. Best-effort — the store is strictly userId-keyed, so a
     // failed delete cannot leak into the new user's session.
@@ -1453,12 +1521,29 @@ async function _ensureAppReadyForUser(user) {
     }
     setLocalDataOwner(user.id)
     await _clearInMemoryUserState()
+    _ownershipReady = Promise.resolve({ outcome: 'purged' })
   } else {
-    // First boot on this page load: align the marker without a purge.
-    setLocalDataOwner(user.id)
+    // First sign-in on this page load, or a sign-in after a sign-out. The
+    // marker is deliberately NOT overwritten: it may still name a previous
+    // account whose purge never ran or failed. Overwriting it first made the
+    // draft restore see a 'match' and reveal that account's drafts. Ownership
+    // is resolved (purging on mismatch) before the reveal instead, so the
+    // marker is in place for the cached-boot and connectivity checks. This
+    // only reads IndexedDB when there is no marker or a mismatch, as the
+    // account-switch purge above already does.
+    const resolution = _resolveLocalOwnershipForBoot(user)
+    _ownershipReady = resolution
+    const { outcome } = await resolution
+    // A sign-out or a newer sign-in replaced this one while it resolved:
+    // leave state.user alone; the caller discards the stale transition.
+    if (outcome === 'stale') return
   }
   state.user = user
   await bootApp(user)
+  // bootApp only wires screens on the first sign-in of a page load; later
+  // sign-ins must still repaint the iNaturalist link state, which the
+  // previous account's sign-out purge may have changed.
+  void _syncInaturalistUi()
 }
 
 async function bootApp(user) {
@@ -1532,7 +1617,14 @@ async function bootApp(user) {
   // The authenticated-resolve path (`_resolveAndRouteForUser`) awaits it
   // before revealing the shell, so calling it a second time from
   // bootApp() would double-fire the profile fetch on every startup.
-  runBootStep('inaturalist-ui', () => _syncInaturalistUi()) // Initial sync of iNaturalist UI
+  // Local data ownership is resolved once, off the reveal path. Both the
+  // iNaturalist UI and the draft restore wait for it, so neither can read a
+  // previous account's data before it has been purged.
+  const ownershipReady = _ownershipReady || _resolveLocalOwnershipForBoot(user)
+  runBootStep('inaturalist-ui', async () => {
+    await ownershipReady
+    await _syncInaturalistUi()
+  })
   runBootStep('identify-labels', () => syncIdentifyButtonLabels())
 
   runBootStep('pending-import-restore', async () => {
@@ -1541,20 +1633,11 @@ async function bootApp(user) {
     // the owner module to purge on mismatch BEFORE we touch the stores. The
     // purge is strict — a thrown IDB error keeps the marker in place so the
     // next boot retries and drafts stay hidden until then.
-    const { outcome } = await resolveLocalDataOwner(user.id, _purgeUserDrafts, {
-      // Legacy rollout: if there's no owner marker but data exists in either
-      // draft store, treat as unowned pre-upgrade data and purge. Documented
-      // trade-off: this may discard one pre-upgrade draft in favor of account
-      // isolation across account switches.
-      hasLegacyData: async () => {
-        try {
-          const sessions = await loadImportSessions()
-          if (sessions.length > 0) return true
-          const draft = await loadReviewDraft()
-          return draft != null
-        } catch { return false }
-      },
-    })
+    // Legacy rollout: with no owner marker, existing drafts or an iNaturalist
+    // session are treated as unowned and purged. Documented trade-off: this
+    // may discard one pre-upgrade draft, or unlink iNaturalist once, in
+    // favour of account isolation.
+    const { outcome } = await ownershipReady
     if (outcome === 'purge_failed' || outcome === 'legacy_purge_failed') {
       console.warn('[boot] Ownership purge failed; skipping draft restore this session.')
       return
@@ -1563,7 +1646,8 @@ async function bootApp(user) {
       console.info('[boot] Purged prior owner\'s local drafts on cold-start.')
       return
     }
-    // Only 'match' or 'assigned' reach here.
+    // 'stale': a newer sign-in or a sign-out replaced this resolution.
+    if (outcome !== 'match' && outcome !== 'assigned') return
 
     const pending = await loadImportSessions()
     if (pending.length) {
@@ -1856,6 +1940,7 @@ async function _revealTrustedCachedShell({ snapshot, targetState, reachability, 
   // Synchronously blank any prior-user DOM and put up the blocker BEFORE
   // any await — even for the same owner this keeps the boundary intact.
   clearUserScopedUi()
+  resetMapForAccountTransition()
   showAccountTransitionBlocker()
   setAuthState({ state: AUTH_STATE.RESOLVING, userId: expectedUserId })
   showAuthOverlay()
@@ -2255,15 +2340,20 @@ async function init() {
       // Bump the transition generation FIRST so any in-flight resolution
       // for the previous user is rejected as stale before touching DOM.
       beginAccountTransition()
+      // A pending local-ownership resolution for the signed-out user must not
+      // purge or claim data after this point.
+      _invalidatePendingOwnership()
       // Synchronously blank prior-user DOM before any await — no A content
       // may survive after this line, and none of the following awaits may
       // paint it back.
       clearUserScopedUi()
+      resetMapForAccountTransition()
       let purgeOk = true
       try {
         await _purgeUserDrafts()
       } catch (err) {
         purgeOk = false
+        blockInaturalistSessionForThisPageLoad()
         console.error('Draft purge on sign-out failed; owner marker preserved for next-boot retry:', _safeErrorCode(err))
       }
       await _clearInMemoryUserState()
