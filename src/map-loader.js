@@ -1,4 +1,5 @@
 let mapModulePromise = null
+let mapModule = null
 let mapInitialized = false
 
 async function ensureMapModule() {
@@ -6,11 +7,24 @@ async function ensureMapModule() {
     mapModulePromise = import('./screens/map.js')
   }
   const module = await mapModulePromise
+  mapModule = module
   if (!mapInitialized) {
     module.initMap()
     mapInitialized = true
   }
   return module
+}
+
+/**
+ * Synchronously clear the previous account's map data at sign-out or account
+ * switch. A no-op until the map has been opened, so it never pulls Leaflet in.
+ */
+export function resetMapForAccountTransition() {
+  try {
+    mapModule?.resetMapForAccountTransition?.()
+  } catch (err) {
+    console.warn('Map reset on account transition failed:', err)
+  }
 }
 
 export async function loadMapScreen() {

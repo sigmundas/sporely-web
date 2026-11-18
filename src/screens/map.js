@@ -11,6 +11,7 @@ import { openFindDetail } from './find_detail.js'
 import { LOCATION_STATE_CHANGED_EVENT } from '../geo.js'
 import { esc as _esc } from '../esc.js'
 import { normalizeCoordinatePair } from '../observation-shapes.js'
+import { currentAccountGeneration, isCurrentAccountTransition } from '../account-transition.js'
 
 let map          = null
 let markerLayer  = null
@@ -533,6 +534,20 @@ export function initMap() {
 
 // ── Load (called on navigate) ─────────────────────────────────────────────────
 
+/**
+ * Drop everything the map holds for the signed-in account: cached rows,
+ * markers and any pending focus. Called at sign-out and account switch so the
+ * next account never sees the previous one's markers, even briefly.
+ */
+export function resetMapForAccountTransition() {
+  for (const scope of Object.keys(_mapData)) _mapData[scope] = []
+  markerLayer?.clearLayers()
+  fuzzedCircleLayer?.clearLayers()
+  _markersById.clear()
+  _pendingFocus = null
+  _focusReturn = null
+}
+
 export async function loadMap() {
   requestAnimationFrame(() => map?.invalidateSize())
   _syncLocationPickerUi()
@@ -561,13 +576,20 @@ export async function loadMap() {
   document.querySelectorAll('.map-scope-btn[data-scope="friends"]').forEach(el => el.textContent = t('scope.friends'))
   document.querySelectorAll('.map-scope-btn[data-scope="public"]').forEach(el => el.textContent = t('scope.community'))
 
+  // A query started for one account must not repaint after a sign-out or
+  // account switch has happened while it was in flight.
+  const generation = currentAccountGeneration()
+  const userId = state.user.id
+  const stale = () => !isCurrentAccountTransition(generation, userId, state.user?.id)
+
   if (currentScope === 'mine') {
     const { data } = await _withLocationPrecisionFallback(columns => _applyTimeFilter(supabase
       .from('observations')
       .select(columns)
-      .eq('user_id', state.user.id)
+      .eq('user_id', userId)
       .not('gps_latitude', 'is', null)
       .not('gps_longitude', 'is', null)))
+    if (stale()) return
     _mapData.mine    = data || []
     _mapData.friends = []
     _mapData.feed    = []
@@ -577,9 +599,10 @@ export async function loadMap() {
     const { data } = await _withLocationPrecisionFallback(columns => _applyTimeFilter(supabase
       .from('observations_friend_view')
       .select(columns)
-      .neq('user_id', state.user.id)
+      .neq('user_id', userId)
       .not('gps_latitude', 'is', null)
       .not('gps_longitude', 'is', null)))
+    if (stale()) return
     _mapData.mine    = []
     _mapData.friends = data || []
     _mapData.feed    = []
@@ -591,6 +614,7 @@ export async function loadMap() {
       .select(columns)
       .not('gps_latitude', 'is', null)
       .not('gps_longitude', 'is', null)))
+    if (stale()) return
     _mapData.feed = data || []
   } else if (currentScope === 'public') {
     const { data } = await _withLocationPrecisionFallback(columns => _applyTimeFilter(supabase
@@ -598,6 +622,7 @@ export async function loadMap() {
       .select(columns)
       .not('gps_latitude', 'is', null)
       .not('gps_longitude', 'is', null)))
+    if (stale()) return
     _mapData.public = data || []
   } else {
     _mapData.mine    = []

@@ -70,7 +70,7 @@ import {
 } from './account-transition.js'
 import { initPeople, loadPeople } from './screens/people.js'
 import { initAiCropEditor } from './ai-crop-editor.js'
-import { loadMapScreen } from './map-loader.js'
+import { loadMapScreen, resetMapForAccountTransition } from './map-loader.js'
 import {
   CLOUD_PLAN_SOURCE,
   fetchCloudPlanProfile,
@@ -894,11 +894,26 @@ async function _handleInaturalistOAuthReturn(url) {
   return outcome
 }
 
-// Purges the two privacy-sensitive draft stores. THROWS on failure so the
-// caller can leave the owner marker in place and retry on the next boot.
+// Purges the device data that belongs to one Sporely account but is not
+// keyed by it: the linked iNaturalist session (tokens with write scope) and
+// the two privacy-sensitive draft stores. Runs on explicit sign-out, account
+// switch and a cold-start owner mismatch. THROWS on failure so the caller can
+// leave the owner marker in place and retry on the next boot.
 async function _purgeUserDrafts() {
+  await forgetInaturalistSession()
   await clearImportSessionsStrict()
   await clearReviewDraftStrict()
+}
+
+// Draft data with no owner marker predates ownership tracking; it is treated
+// as unowned and purged before anything is assigned.
+async function _hasLegacyDraftData() {
+  try {
+    const sessions = await loadImportSessions()
+    if (sessions.length > 0) return true
+    const draft = await loadReviewDraft()
+    return draft != null
+  } catch { return false }
 }
 
 async function _clearInMemoryUserState() {
@@ -1118,6 +1133,7 @@ async function _resolveAndRouteForUser(user) {
   // BEFORE any await runs. Neither the browser paint pipeline nor a late
   // account-A response can leak stale DOM after this point.
   clearUserScopedUi()
+  resetMapForAccountTransition()
   showAccountTransitionBlocker()
   setAuthState({ state: AUTH_STATE.RESOLVING, userId: expectedUserId })
   showAuthOverlay()
@@ -1454,8 +1470,13 @@ async function _ensureAppReadyForUser(user) {
     setLocalDataOwner(user.id)
     await _clearInMemoryUserState()
   } else {
-    // First boot on this page load: align the marker without a purge.
-    setLocalDataOwner(user.id)
+    // First boot on this page load. The marker may still name a previous
+    // account whose sign-out purge never ran or failed, so resolve ownership
+    // (purging that account's data on mismatch) instead of overwriting the
+    // marker. Overwriting it first made the restore step below see a 'match'
+    // and reveal the previous account's drafts to this user. On a failed
+    // purge the marker stays put and the restore step skips restoration.
+    await resolveLocalDataOwner(user.id, _purgeUserDrafts, { hasLegacyData: _hasLegacyDraftData })
   }
   state.user = user
   await bootApp(user)
@@ -1546,14 +1567,7 @@ async function bootApp(user) {
       // draft store, treat as unowned pre-upgrade data and purge. Documented
       // trade-off: this may discard one pre-upgrade draft in favor of account
       // isolation across account switches.
-      hasLegacyData: async () => {
-        try {
-          const sessions = await loadImportSessions()
-          if (sessions.length > 0) return true
-          const draft = await loadReviewDraft()
-          return draft != null
-        } catch { return false }
-      },
+      hasLegacyData: _hasLegacyDraftData,
     })
     if (outcome === 'purge_failed' || outcome === 'legacy_purge_failed') {
       console.warn('[boot] Ownership purge failed; skipping draft restore this session.')
@@ -1856,6 +1870,7 @@ async function _revealTrustedCachedShell({ snapshot, targetState, reachability, 
   // Synchronously blank any prior-user DOM and put up the blocker BEFORE
   // any await — even for the same owner this keeps the boundary intact.
   clearUserScopedUi()
+  resetMapForAccountTransition()
   showAccountTransitionBlocker()
   setAuthState({ state: AUTH_STATE.RESOLVING, userId: expectedUserId })
   showAuthOverlay()
@@ -2259,6 +2274,7 @@ async function init() {
       // may survive after this line, and none of the following awaits may
       // paint it back.
       clearUserScopedUi()
+      resetMapForAccountTransition()
       let purgeOk = true
       try {
         await _purgeUserDrafts()

@@ -458,3 +458,29 @@ test('offline fallback: reveal drives the Offline pill from the target state (CA
   assert.match(revealBody, /_setOfflineIndicator\(_shouldShowOfflineIndicatorForState\(targetState\)\)/)
   assert.equal(/_setOfflineIndicator\(true\)/.test(revealBody), false, 'the reveal must not force the pill on unconditionally')
 })
+
+test('account isolation: the shared purge forgets the linked iNaturalist session', () => {
+  const body = _extractFunctionBody(mainSource, 'async function _purgeUserDrafts(')
+  assert.match(body, /await forgetInaturalistSession\(\)/,
+    'iNaturalist tokens are stored under keys with no Sporely user id, so the purge that runs on sign-out, account switch and owner mismatch must drop them')
+})
+
+test('account isolation: first boot resolves draft ownership instead of overwriting the marker', () => {
+  const body = _extractFunctionBody(mainSource, 'async function _ensureAppReadyForUser(')
+  const elseIdx = body.indexOf('} else {')
+  assert.ok(elseIdx > 0)
+  const firstBoot = body.slice(elseIdx)
+  assert.match(firstBoot, /resolveLocalDataOwner\(user\.id, _purgeUserDrafts/,
+    'first boot must purge a previous owner\'s drafts on mismatch')
+  assert.doesNotMatch(firstBoot, /setLocalDataOwner\(/,
+    'overwriting the marker before the restore step makes a previous account\'s drafts look like this user\'s')
+})
+
+test('account isolation: every account-transition UI wipe also resets the map', () => {
+  const calls = [...mainSource.matchAll(/^(\s*)clearUserScopedUi\(\)\n/gm)]
+  assert.ok(calls.length >= 3, 'expected the sign-in, switch and sign-out wipes')
+  for (const call of calls) {
+    const after = mainSource.slice(call.index + call[0].length, call.index + call[0].length + 120)
+    assert.match(after, /^\s*resetMapForAccountTransition\(\)/, 'the map keeps its own rows in module memory, outside the DOM wipe')
+  }
+})
