@@ -74,12 +74,14 @@ This repository owns the W2–W5 cloud and web implementation described there.
   - User-editable columns: `username` (unique), `display_name`, `avatar_url`, `bio`
   - Server-owned columns: `cloud_plan`, `is_pro`, `full_res_storage_enabled`, `storage_quota_bytes`, `storage_used_bytes`, `billing_status`, `billing_provider`, `billing_customer_id`, `billing_payment_id`, `billing_checkout_session_id`, `billing_updated_at`, `total_storage_bytes`, `image_count`, `is_admin`, `is_banned`
   - A `BEFORE UPDATE` trigger keeps the server-owned columns immutable for normal authenticated writes; service-role code can still update them
+  - Clients can only read and update their own row: `authenticated` has no `INSERT` or `DELETE` on `profiles` (since `20261118120000`), so the `BEFORE UPDATE` trigger cannot be sidestepped by deleting and re-inserting the row. Creation is the `on_auth_user_created` trigger; deletion is the `delete-account` Edge Function
   - `bio` is used by the web Profile editor and the People screen cards
   - Avatar initials derived from `username` or `email` on the client
 - `friendships`
   - Bidirectional friendship rows with status gating: `pending` / `accepted` / `blocked`
   - Columns: `requester_id` (uuid), `addressee_id` (uuid), `status`
   - Used to compute friend visibility
+  - Client writes (since `20261118120000`): the requester may insert only a `pending` request to someone else; only the addressee may change it, and only from `pending` to `accepted`; `status` is the only client-updatable column; either party may delete. `blocked` is not client-writable. `anon` has no access
 - `observation_shares`
   - Grants access to specific users (including location access edge cases)
 
