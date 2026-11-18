@@ -7,32 +7,43 @@ import path from 'node:path';
 import { buildPurgeSql, PAYLOAD_TABLES, prepareReleasePurge } from './prepare-release-purge.mjs';
 
 const integration = process.env.TAXONOMY_PURGE_INTEGRATION === '1';
+const OLD = 'tax-2026.10.07-01';
+const KEEP = 'tax-2026.10.23-11';
 
 test('refuses malformed release IDs and output inside the repository', async () => {
   for (const releaseId of [undefined, '', 'tax-2026.10.07', "tax-2026.10.07-01'; drop table x; --"]) {
-    assert.throws(() => buildPurgeSql({ releaseId }), /release ID must match/);
+    assert.throws(() => buildPurgeSql({ releaseId, expectedPrevious: KEEP }), /release ID must match/);
   }
-  await assert.rejects(prepareReleasePurge({ releaseId: 'tax-2026.10.07-01', output: path.resolve('purge.sql') }), /outside Git/);
-  await assert.rejects(prepareReleasePurge({ releaseId: 'tax-2026.10.07-01' }), /output path is required/);
+  assert.throws(() => buildPurgeSql({ releaseId: OLD }), /previous release to keep is required/);
+  assert.throws(() => buildPurgeSql({ releaseId: OLD, expectedPrevious: OLD }), /target is the previous release/);
+  assert.throws(() => buildPurgeSql({ releaseId: OLD, expectedPrevious: KEEP, allowPrevious: true }), /not both/);
+  assert.throws(() => buildPurgeSql({ releaseId: OLD, expectedPrevious: KEEP, systemIdentifier: "1' or '1" }), /numeric/);
+  assert.match(buildPurgeSql({ releaseId: OLD, expectedPrevious: KEEP }), /system_identifier::text FROM pg_catalog\.pg_control_system\(\)\) IS DISTINCT FROM '7606130613603586966'/);
+  await assert.rejects(prepareReleasePurge({ releaseId: OLD, expectedPrevious: KEEP, output: path.resolve('purge.sql') }), /outside Git/);
+  await assert.rejects(prepareReleasePurge({ releaseId: OLD, expectedPrevious: KEEP }), /output path is required/);
+  await assert.rejects(prepareReleasePurge({ releaseId: OLD, expectedPrevious: KEEP, output: path.join(os.tmpdir(), 'purge.sql; env >&2') }), /output file name/);
 });
 
 test('writes a private file once and bakes the previous-release choice into the SQL', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'taxonomy-purge-'));
   try {
     const output = path.join(dir, 'purge.sql');
-    const result = await prepareReleasePurge({ releaseId: 'tax-2026.10.07-01', output });
+    const result = await prepareReleasePurge({ releaseId: OLD, expectedPrevious: KEEP, output });
     assert.equal((await stat(output)).mode & 0o777, 0o600);
     const sql = await readFile(output, 'utf8');
     assert.match(sql, /RELEASE: tax-2026\.10\.07-01/);
     assert.match(sql, /AND NOT false THEN/);
+    assert.match(sql, /IS DISTINCT FROM 'tax-2026\.10\.23-11'/);
     for (const table of PAYLOAD_TABLES) {
       assert.match(sql, new RegExp(`DELETE FROM public\\.${table} WHERE release_id = 'tax-2026\\.10\\.07-01';`));
       assert.match(sql, new RegExp(`VACUUM \\(FULL, ANALYZE\\) public\\.${table};`));
     }
+    assert.ok(sql.indexOf('pg_try_advisory_lock') < sql.indexOf('BEGIN;'), 'advisory locks are taken before the delete transaction');
     assert.ok(sql.indexOf('COMMIT;') < sql.indexOf('VACUUM'), 'rebuild runs after the delete commits');
+    assert.ok(sql.lastIndexOf('VACUUM') < sql.indexOf('pg_advisory_unlock'), 'advisory locks are held until every rebuild is done');
     assert.equal(result.allow_previous, false);
-    await assert.rejects(prepareReleasePurge({ releaseId: 'tax-2026.10.07-01', output }), /EEXIST/);
-    assert.match(buildPurgeSql({ releaseId: 'tax-2026.10.07-01', allowPrevious: true }), /AND NOT true THEN/);
+    await assert.rejects(prepareReleasePurge({ releaseId: OLD, expectedPrevious: KEEP, output }), /EEXIST/);
+    assert.match(buildPurgeSql({ releaseId: OLD, allowPrevious: true }), /AND NOT true THEN/);
   } finally {
     await rm(dir, { recursive: true });
   }
@@ -101,19 +112,31 @@ test('purges only a retired release and refuses everything the policy protects',
     assert.ok(ready, 'container did not become ready');
     assert.equal(psql(container, SCHEMA + seedSql()).code, 0);
     assert.equal(counts(container), FULL);
+    const systemIdentifier = psql(container, 'select system_identifier from pg_control_system();').stdout;
+    const purge = options => psql(container, buildPurgeSql({ systemIdentifier, ...options }));
 
-    // The active release and the previous release (without the flag) are refused; nothing changes.
-    let run = psql(container, buildPurgeSql({ releaseId: 'tax-2026.10.31-01', allowPrevious: true }));
+    // Another database (the production identifier is the default) is refused.
+    let run = psql(container, buildPurgeSql({ releaseId: OLD, expectedPrevious: KEEP }));
+    assert.notEqual(run.code, 0); assert.match(run.stderr, /not the expected target/);
+
+    // The active release, an unknown release, and a wrong expected previous release are refused.
+    run = purge({ releaseId: 'tax-2026.10.31-01', allowPrevious: true });
     assert.notEqual(run.code, 0); assert.match(run.stderr, /status active; only retired releases/);
-    run = psql(container, buildPurgeSql({ releaseId: 'tax-2026.10.23-11' }));
-    assert.notEqual(run.code, 0); assert.match(run.stderr, /previous release \(rollback target\)/);
-    run = psql(container, buildPurgeSql({ releaseId: 'tax-2026.01.01-01' }));
+    run = purge({ releaseId: 'tax-2026.01.01-01', expectedPrevious: KEEP });
     assert.notEqual(run.code, 0); assert.match(run.stderr, /does not exist/);
+    run = purge({ releaseId: KEEP, expectedPrevious: OLD });
+    assert.notEqual(run.code, 0); assert.match(run.stderr, /previous release is tax-2026\.10\.23-11, not the expected tax-2026\.10\.07-01/);
     assert.equal(counts(container), FULL);
+
+    // An ambiguous previous release (tied activation time) is refused, even with --allow-previous.
+    psql(container, `update public.taxonomy_v2_releases set activated_at = '2026-10-25' where release_id = '${OLD}';`);
+    run = purge({ releaseId: OLD, allowPrevious: true });
+    assert.notEqual(run.code, 0); assert.match(run.stderr, /previous release is ambiguous/);
+    psql(container, `update public.taxonomy_v2_releases set activated_at = '2026-10-07' where release_id = '${OLD}';`);
 
     // A running import blocks the purge.
     psql(container, "insert into public.taxonomy_v2_import_runs (release_id, status) values ('tax-2026.10.31-01', 'running');");
-    run = psql(container, buildPurgeSql({ releaseId: 'tax-2026.10.07-01' }));
+    run = purge({ releaseId: OLD, expectedPrevious: KEEP });
     assert.notEqual(run.code, 0); assert.match(run.stderr, /import is in progress/);
     psql(container, "delete from public.taxonomy_v2_import_runs where status = 'running';");
 
@@ -126,7 +149,7 @@ test('purges only a retired release and refuses everything the policy protects',
         if (!held) await new Promise(r => setTimeout(r, 250));
       }
       assert.ok(held, 'advisory lock was not taken');
-      run = psql(container, buildPurgeSql({ releaseId: 'tax-2026.10.07-01' }));
+      run = purge({ releaseId: OLD, expectedPrevious: KEEP });
       assert.notEqual(run.code, 0); assert.match(run.stderr, /holds its lock/);
     } finally {
       holder.kill();
@@ -136,20 +159,21 @@ test('purges only a retired release and refuses everything the policy protects',
 
     // An unknown release-scoped table blocks the purge.
     psql(container, 'create table public.taxonomy_v2_new_payload (release_id text);');
-    run = psql(container, buildPurgeSql({ releaseId: 'tax-2026.10.07-01' }));
+    run = purge({ releaseId: OLD, expectedPrevious: KEEP });
     assert.notEqual(run.code, 0); assert.match(run.stderr, /release-scoped tables changed/);
     psql(container, 'drop table public.taxonomy_v2_new_payload;');
 
     // The oldest retired release purges; the header, audit and other releases stay.
-    run = psql(container, buildPurgeSql({ releaseId: 'tax-2026.10.07-01' }));
+    run = purge({ releaseId: OLD, expectedPrevious: KEEP });
     assert.equal(run.code, 0, run.stderr);
-    assert.equal(counts(container), 'tax-2026.10.23-11=18,tax-2026.10.31-01=18');
-    assert.equal(psql(container, "select status || '|' || (select count(*) from public.taxonomy_v2_import_runs where release_id = 'tax-2026.10.07-01') from public.taxonomy_v2_releases where release_id = 'tax-2026.10.07-01';").stdout, 'retired|1');
+    assert.equal(run.stdout.split('\n')[0], 't', 'both advisory locks were held through the rebuild and released');
+    assert.equal(counts(container), `${KEEP}=18,tax-2026.10.31-01=18`);
+    assert.equal(psql(container, `select status || '|' || (select count(*) from public.taxonomy_v2_import_runs where release_id = '${OLD}') from public.taxonomy_v2_releases where release_id = '${OLD}';`).stdout, 'retired|1');
     assert.equal(psql(container, 'select selected_sporely_taxon_id from public.observations where id = 1;').stdout, '2');
 
-    // Rerunning is harmless, and the previous release goes only with the flag.
-    assert.equal(psql(container, buildPurgeSql({ releaseId: 'tax-2026.10.07-01' })).code, 0);
-    run = psql(container, buildPurgeSql({ releaseId: 'tax-2026.10.23-11', allowPrevious: true }));
+    // Rerunning is harmless, and the previous release goes only with --allow-previous.
+    assert.equal(purge({ releaseId: OLD, expectedPrevious: KEEP }).code, 0);
+    run = purge({ releaseId: KEEP, allowPrevious: true });
     assert.equal(run.code, 0, run.stderr);
     assert.equal(counts(container), 'tax-2026.10.31-01=18');
   } finally {

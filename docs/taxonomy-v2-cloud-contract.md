@@ -293,34 +293,53 @@ write and needs explicit approval for the named release.
 
 ```sh
 npm run taxonomy:v2:prepare-purge -- \
-  --release-id tax-YYYY.MM.DD-NN --output /private/dir/purge-tax-YYYY.MM.DD-NN.sql
+  --release-id tax-YYYY.MM.DD-NN --expected-previous tax-YYYY.MM.DD-NN \
+  --output /private/dir/purge-tax-YYYY.MM.DD-NN.sql
 ```
 
-Add `--allow-previous` only when the previous release (the rollback target)
-is to go as well. Run the file with the containerised `psql` command the script
-prints. In one transaction the file:
+`--expected-previous` names the previous release (the rollback target) that
+stays. `activated_at` holds the activating transaction's start time, not the
+commit time, so the file uses it only as a cross-check: it refuses if the most
+recently activated retired release differs from the named one, or if that
+choice is tied or has no timestamp. Use `--allow-previous` instead only when
+the previous release is to go as well. Run the file with the containerised
+`psql` command the script prints. The file:
 
-- takes the import and activation advisory locks without waiting, and refuses
-  if either is held;
-- refuses unless the release exists and is `retired`, exactly one release is
-  `active`, no release is `loading`/`ready`, no import run is `running`, and
-  the release is not the previous release (unless allowed);
+- refuses unless `pg_control_system().system_identifier` is the production
+  identifier pinned in `prepare-production-release-import.mjs`
+  (`--system-identifier` targets a disposable database instead);
+- takes the import and activation advisory locks as session locks without
+  waiting, refuses if either is held, and keeps both until every rebuild is
+  done, so no import or activation can start between the delete and the
+  rebuilds;
+- in one transaction, refuses unless the release exists and is `retired`,
+  exactly one release is `active`, no release is `loading`/`ready`, no import
+  run is `running`, and the previous-release checks above pass;
 - refuses if the set of public tables with a `release_id` column differs from
   the six payload tables plus `taxonomy_v2_releases` and
   `taxonomy_v2_import_runs`, so a new payload table is never left behind;
 - deletes the release's rows from the payload tables, checks none remain, and
   commits.
 
-It then runs `VACUUM (FULL, ANALYZE)` on each payload table. Deleting rows
-alone does not shrink the database. Each rebuild holds an ACCESS EXCLUSIVE lock
-for a few seconds and gives up after a 5 s lock wait; rerun the same file to
-finish. The header and import-run rows stay, so the release remains recorded
-as `retired`. The production importer refuses any release whose header
-exists, so bringing a purged release back is a manual recovery: remove its
-header and audit rows, then re-import it from its frozen export. No view,
-function, or observation reads a retired release's payload: observations
-reference `taxonomy_v2_concepts`, and search and resolution read the active
-release.
+It then runs `VACUUM (FULL, ANALYZE)` on each payload table, because deleting
+rows alone does not shrink the database. A rebuild rewrites the whole table,
+including the active release's rows, and holds an ACCESS EXCLUSIVE lock for
+its full duration (3–7 s per table on 2026-11-18). Search, resolution and
+selection on that table wait meanwhile. While a rebuild waits for its lock,
+new queries on the table queue behind it; the wait is capped at 2 s, after
+which the file stops. Run it at a quiet time. Each rebuild also needs room for
+a copy of the table's remaining rows and indexes until it finishes. If a
+rebuild stops, the delete is already committed and the space stays unreclaimed
+until the same file is rerun; a rerun deletes nothing more and repeats the
+rebuilds.
+
+The header and import-run rows stay, so the release remains recorded as
+`retired`. There is no supported way to restore a purged release: the
+production importer refuses any release whose header exists, and the header
+cannot be deleted while `taxonomy_v2_concepts.first_seen_release_id` refers to
+it. Restoring one needs its own reviewed procedure. No view, function, or
+observation reads a retired release's payload: observations reference
+`taxonomy_v2_concepts`, and search and resolution read the active release.
 
 On 2026-11-18, with approval, the payload of `tax-2026.10.07-01` and
 `tax-2026.10.23-11` was removed by equivalent manual SQL and the payload
