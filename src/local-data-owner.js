@@ -42,11 +42,17 @@ export function clearLocalDataOwner(storage = _defaultStorage()) {
 //                            NOT moved; caller MUST skip restoration.
 //   - 'legacy_purge_failed'— legacy pre-marker data detected but the purge
 //                            threw; marker NOT set; caller MUST skip restoration.
+//   - 'stale'              — `isCurrent()` turned false (a newer sign-in or a
+//                            sign-out superseded this resolution); nothing more
+//                            is purged or assigned; caller MUST skip restoration.
 //
 // `purgeFn` must throw on failure. `hasLegacyData` (optional) is called only
-// when there is no marker and returns a boolean.
-export async function resolveLocalDataOwner(userId, purgeFn, { storage = _defaultStorage(), hasLegacyData = null } = {}) {
+// when there is no marker and returns a boolean. `isCurrent` (optional) is
+// checked before every purge and marker write, so an older resolution can
+// never purge or claim data for an account that has since been replaced.
+export async function resolveLocalDataOwner(userId, purgeFn, { storage = _defaultStorage(), hasLegacyData = null, isCurrent = null } = {}) {
   if (!userId) return { outcome: 'assigned' }
+  const stale = () => typeof isCurrent === 'function' && !isCurrent()
   const owner = getLocalDataOwner(storage)
 
   if (!owner) {
@@ -55,6 +61,7 @@ export async function resolveLocalDataOwner(userId, purgeFn, { storage = _defaul
     if (typeof hasLegacyData === 'function') {
       try { legacy = !!(await hasLegacyData()) } catch { legacy = false }
     }
+    if (stale()) return { outcome: 'stale' }
     if (legacy) {
       try {
         if (typeof purgeFn === 'function') await purgeFn()
@@ -62,6 +69,7 @@ export async function resolveLocalDataOwner(userId, purgeFn, { storage = _defaul
         console.warn('Legacy pre-marker purge failed; keeping marker unset for retry:', err)
         return { outcome: 'legacy_purge_failed' }
       }
+      if (stale()) return { outcome: 'stale' }
       setLocalDataOwner(userId, storage)
       return { outcome: 'purged' }
     }
@@ -70,6 +78,7 @@ export async function resolveLocalDataOwner(userId, purgeFn, { storage = _defaul
   }
 
   if (owner === userId) return { outcome: 'match' }
+  if (stale()) return { outcome: 'stale' }
 
   // Owner mismatch — purge first. Only reassign the marker if the purge
   // actually succeeded, so the next boot retries on failure.
@@ -79,6 +88,7 @@ export async function resolveLocalDataOwner(userId, purgeFn, { storage = _defaul
     console.warn('Draft purge on owner mismatch failed; preserving old marker for retry:', err)
     return { outcome: 'purge_failed' }
   }
+  if (stale()) return { outcome: 'stale' }
   setLocalDataOwner(userId, storage)
   return { outcome: 'purged' }
 }

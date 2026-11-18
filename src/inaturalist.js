@@ -388,24 +388,48 @@ async function _loadStoredSession(storageImpl) {
 }
 
 // Account isolation. The stored session belongs to whichever Sporely account
-// linked it, but its keys carry no Sporely user id. `forgetInaturalistSession`
-// bumps this generation synchronously, so a refresh or login that started
-// before the forget cannot write the old account's tokens back afterwards.
+// linked it, but its keys carry no Sporely user id.
+//
+// `_forgetGeneration` is bumped synchronously by forget and by block, so a
+// refresh or login that started earlier cannot write the old account's
+// tokens back afterwards.
 let _forgetGeneration = 0
-// Set when the session could not be removed for an account change: the
-// tokens stay unreadable for the rest of this page load.
+// Set while the stored session may belong to another Sporely account (its
+// removal failed, or ownership is not resolved yet): loads return nothing and
+// refreshes persist nothing. Only an explicit new link lifts it.
 let _sessionBlocked = false
-
-export function blockInaturalistSessionForThisPageLoad() {
-  _sessionBlocked = true
-}
+// Bumped by every explicit link (OAuth callback or native login), so a block
+// decided for an older session does not hide one linked after it.
+let _linkEpoch = 0
 
 export function inaturalistSessionGeneration() {
   return _forgetGeneration
 }
 
+export function inaturalistLinkEpoch() {
+  return _linkEpoch
+}
+
+/**
+ * Make the stored session unreadable for this page load and cancel in-flight
+ * refreshes. With `unlessLinkedSince`, a session explicitly linked after that
+ * epoch is left alone (it belongs to the current account).
+ */
+export function blockInaturalistSessionForThisPageLoad({ unlessLinkedSince } = {}) {
+  if (unlessLinkedSince !== undefined && _linkEpoch !== unlessLinkedSince) return
+  _sessionBlocked = true
+  _forgetGeneration += 1
+}
+
+/** Lift a block once ownership of the stored session has been settled. */
+export function unblockInaturalistSession() {
+  _sessionBlocked = false
+}
+
 // Whether any iNaturalist credential is stored on this device, read without
 // refreshing anything. Used to treat a pre-ownership session as unowned.
+// Throws if the store cannot be read: callers must treat that as "may hold
+// another account's session", never as empty.
 export async function hasStoredInaturalistSession(storageImpl) {
   const session = await _loadStoredSession(storageImpl)
   return Boolean(
@@ -415,11 +439,14 @@ export async function hasStoredInaturalistSession(storageImpl) {
   )
 }
 
-async function _persistSession(session, storageImpl, generation = _forgetGeneration) {
+async function _persistSession(session, storageImpl, generation = _forgetGeneration, { explicitLink = false } = {}) {
   if (generation !== _forgetGeneration) {
-    // The session was forgotten while this write was in flight.
+    // The session was forgotten or blocked while this write was in flight.
     return false
   }
+  // A refresh never writes while blocked; only an explicit new link may
+  // replace a session that could belong to another account.
+  if (_sessionBlocked && !explicitLink) return false
   const storage = _storageFor(storageImpl)
   await Promise.all([
     _writeStorageValue(storage, INAT_ACCESS_TOKEN_KEY, session.access_token ?? ''),
@@ -434,13 +461,17 @@ async function _persistSession(session, storageImpl, generation = _forgetGenerat
     _writeStorageValue(storage, INAT_REDIRECT_URI_KEY, session.redirect_uri ?? ''),
     _writeStorageValue(storage, INAT_PLATFORM_KEY, session.platform ?? ''),
   ])
-  // A complete new session overwrote whatever could not be removed before.
-  _sessionBlocked = false
+  if (explicitLink) {
+    // A complete new session overwrote whatever could not be removed before.
+    _sessionBlocked = false
+    _linkEpoch += 1
+  }
   return true
 }
 
+// Persists a session the user just linked explicitly.
 export async function persistInaturalistSession(session, storageImpl, generation = _forgetGeneration) {
-  return _persistSession(session, storageImpl, generation)
+  return _persistSession(session, storageImpl, generation, { explicitLink: true })
 }
 
 function _assertNotForgotten(generation) {
@@ -588,7 +619,9 @@ export async function fetchInaturalistApiToken(accessToken, fetchImpl = _default
 }
 
 export async function completeNativeInaturalistLogin(pluginResult, options = {}) {
-  const generation = _forgetGeneration
+  // Captured by connectInaturalist before the OAuth prompt opened, so an
+  // account change while the prompt was up cancels this login.
+  const generation = Number.isInteger(options.generation) ? options.generation : _forgetGeneration
   const normalized = normalizeCapgoOAuth2Result(pluginResult)
   const accessToken = _cleanString(normalized.access_token)
   if (!accessToken) {
@@ -687,6 +720,7 @@ export async function initializeInaturalistOAuth(options = {}) {
 
 export async function connectInaturalist(options = {}) {
   const platform = _normalizePlatform(options.platform || (typeof window !== 'undefined' ? getPlatform() : null))
+  const generation = _forgetGeneration
   if (platform === 'android') {
     // Lazy dynamic import — the SocialLogin plugin must not be reachable from
     // the eager startup chunk. `getNativeSocialLogin` returns the same
@@ -719,7 +753,7 @@ export async function connectInaturalist(options = {}) {
       })
       throw new Error('native OAuth login returned no access token')
     }
-    return completeNativeInaturalistLogin(loginResult, options)
+    return completeNativeInaturalistLogin(loginResult, { ...options, generation })
   }
 
   const authUrl = await buildInaturalistAuthorizationUrl({
@@ -1057,7 +1091,7 @@ export async function completeInaturalistOAuthCallback(input, stateOrOptions, ma
   }
 
   _assertNotForgotten(generation)
-  await _persistSession(nextSession, storage, generation)
+  await _persistSession(nextSession, storage, generation, { explicitLink: true })
   await clearInatPendingState(storage)
   return _normalizeSessionShape(nextSession)
 }

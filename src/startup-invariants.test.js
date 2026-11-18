@@ -470,21 +470,34 @@ test('account isolation: sign-in without a switch resolves ownership instead of 
   const elseIdx = body.indexOf('} else {')
   assert.ok(elseIdx > 0)
   const nonSwitch = body.slice(elseIdx)
-  assert.match(nonSwitch, /_ownershipReady = _resolveLocalOwnershipForBoot\(user\)/,
+  assert.match(nonSwitch, /const resolution = _resolveLocalOwnershipForBoot\(user\)/,
     'every non-switch sign-in (first boot, or after a sign-out on the same page) must resolve ownership')
+  assert.match(nonSwitch, /await _awaitOwnershipWithinBudget\(resolution\)/,
+    'the marker must normally be in place before the reveal (cached boot and connectivity checks read it)')
   assert.doesNotMatch(nonSwitch, /setLocalDataOwner\(/,
     'overwriting the marker before the restore step makes a previous account\'s drafts look like this user\'s')
-  assert.doesNotMatch(nonSwitch, /await _resolveLocalOwnershipForBoot/,
-    'ownership resolution reads IndexedDB and must stay off the reveal path')
+  const budget = mainSource.match(/OWNERSHIP_RESOLVE_BUDGET_MS = (\d+)/)
+  assert.ok(budget && Number(budget[1]) <= 2000, 'a stalled IndexedDB must not hold the reveal for long')
+})
+
+test('account isolation: superseded ownership resolutions are invalidated', () => {
+  const resolver = _extractFunctionBody(mainSource, 'async function _resolveLocalOwnershipForBoot(')
+  assert.match(resolver, /isCurrent: \(\) => token === _ownershipToken/)
+  const signedOut = mainSource.slice(mainSource.indexOf("event === 'SIGNED_OUT'"))
+  assert.ok(signedOut.indexOf('_invalidatePendingOwnership()') > 0 && signedOut.indexOf('_invalidatePendingOwnership()') < signedOut.indexOf('_purgeUserDrafts()'))
+  const ensure = _extractFunctionBody(mainSource, 'async function _ensureAppReadyForUser(')
+  assert.ok(ensure.indexOf('_invalidatePendingOwnership()') < ensure.indexOf('await _purgeUserDrafts()'))
 })
 
 test('account isolation: ownership resolution purges unowned iNaturalist sessions and blocks on failure', () => {
   const resolver = _extractFunctionBody(mainSource, 'async function _resolveLocalOwnershipForBoot(')
-  assert.match(resolver, /resolveLocalDataOwner\(user\.id, _purgeUserDrafts, \{ hasLegacyData: _hasUnownedLocalData \}\)/)
-  assert.match(resolver, /blockInaturalistSessionForThisPageLoad\(\)/)
+  assert.match(resolver, /resolveLocalDataOwner\(user\.id, _purgeUserDrafts, \{\s*hasLegacyData: _hasUnownedLocalData,/)
+  assert.match(resolver, /blockInaturalistSessionForThisPageLoad\(\{ unlessLinkedSince: linkEpoch \}\)/)
   const unowned = _extractFunctionBody(mainSource, 'async function _hasUnownedLocalData(')
   assert.match(unowned, /hasStoredInaturalistSession\(\)/,
     'a session left by an account that signed out before the purge covered iNaturalist must count as unowned')
+  assert.match(unowned, /catch \{[^}]*return true\s*\}/,
+    'an unreadable credential store must count as unowned, never as empty')
 })
 
 test('account isolation: iNaturalist UI and draft restore wait for ownership', () => {

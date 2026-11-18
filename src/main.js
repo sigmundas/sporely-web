@@ -90,7 +90,9 @@ import {
   connectInaturalist,
   forgetInaturalistSession,
   hasStoredInaturalistSession,
+  inaturalistLinkEpoch,
   loadInaturalistSession,
+  unblockInaturalistSession,
   maybeHandleInaturalistOAuthReturn,
 } from './inaturalist.js'
 import { syncIdentifyButtonLabels } from './identify.js'
@@ -914,7 +916,11 @@ async function _purgeUserDrafts() {
 async function _hasUnownedLocalData() {
   try {
     if (await hasStoredInaturalistSession()) return true
-  } catch { /* fall through to the draft stores */ }
+  } catch {
+    // An unreadable credential store may still hold another account's
+    // session: treat it as unowned so the purge runs (or fails closed).
+    return true
+  }
   try {
     const sessions = await loadImportSessions()
     if (sessions.length > 0) return true
@@ -924,23 +930,59 @@ async function _hasUnownedLocalData() {
 }
 
 // Resolves which account owns this device's local data, purging another
-// account's data on mismatch. Runs once per page load, off the reveal path.
-// If the purge fails, the previous account's iNaturalist session stays
-// unreadable for this page load (drafts are already skipped by the caller).
+// account's data on mismatch. Each resolution carries a token; a newer
+// sign-in, an account switch or a sign-out invalidates it, so an older
+// resolution can never purge or claim data for the account that replaced it.
+// If the purge fails, the stored iNaturalist session stays unreadable for
+// this page load unless the user links a new one meanwhile.
 let _ownershipReady = null
+let _ownershipToken = 0
+// Ownership is resolved before the reveal so the marker is in place for the
+// cached-boot and connectivity checks. A stalled IndexedDB must not hold the
+// reveal, though: past this budget the app reveals with the stored
+// iNaturalist session blocked until ownership settles.
+const OWNERSHIP_RESOLVE_BUDGET_MS = 1500
+
+function _invalidatePendingOwnership() {
+  _ownershipToken += 1
+}
 
 async function _resolveLocalOwnershipForBoot(user) {
+  const token = ++_ownershipToken
+  const linkEpoch = inaturalistLinkEpoch()
   let result
   try {
-    result = await resolveLocalDataOwner(user.id, _purgeUserDrafts, { hasLegacyData: _hasUnownedLocalData })
+    result = await resolveLocalDataOwner(user.id, _purgeUserDrafts, {
+      hasLegacyData: _hasUnownedLocalData,
+      isCurrent: () => token === _ownershipToken,
+    })
   } catch (err) {
     console.warn('[boot] Ownership resolution failed:', _safeErrorCode(err))
     result = { outcome: 'purge_failed' }
   }
   if (result.outcome === 'purge_failed' || result.outcome === 'legacy_purge_failed') {
-    blockInaturalistSessionForThisPageLoad()
+    blockInaturalistSessionForThisPageLoad({ unlessLinkedSince: linkEpoch })
   }
   return result
+}
+
+function _ownershipSettled(outcome) {
+  return outcome === 'match' || outcome === 'assigned' || outcome === 'purged'
+}
+
+async function _awaitOwnershipWithinBudget(resolution) {
+  let timer = null
+  const timedOut = new Promise(resolve => {
+    timer = setTimeout(() => resolve({ outcome: 'timeout' }), OWNERSHIP_RESOLVE_BUDGET_MS)
+  })
+  const result = await Promise.race([resolution, timedOut])
+  clearTimeout(timer)
+  if (result.outcome !== 'timeout') return
+  console.warn('[boot] Ownership resolution exceeded its budget; iNaturalist stays blocked until it settles.')
+  blockInaturalistSessionForThisPageLoad()
+  void resolution.then(late => {
+    if (_ownershipSettled(late.outcome)) unblockInaturalistSession()
+  })
 }
 
 async function _clearInMemoryUserState() {
@@ -1481,6 +1523,7 @@ async function _ensureAppReadyForUser(user) {
     // purge throws, the marker stays with the previous user so the next
     // cold-start ownership check retries it, and the previous user's
     // iNaturalist session stays unreadable meanwhile.
+    _invalidatePendingOwnership()
     try {
       await _purgeUserDrafts()
     } catch (err) {
@@ -1508,9 +1551,11 @@ async function _ensureAppReadyForUser(user) {
     // marker is deliberately NOT overwritten: it may still name a previous
     // account whose purge never ran or failed. Overwriting it first made the
     // draft restore see a 'match' and reveal that account's drafts. Ownership
-    // is resolved (purging on mismatch) off the reveal path instead; the
-    // draft restore and the iNaturalist UI wait for it.
-    _ownershipReady = _resolveLocalOwnershipForBoot(user)
+    // is resolved (purging on mismatch) within a short budget instead; the
+    // draft restore and the iNaturalist UI wait for the full resolution.
+    const resolution = _resolveLocalOwnershipForBoot(user)
+    _ownershipReady = resolution
+    await _awaitOwnershipWithinBudget(resolution)
   }
   state.user = user
   await bootApp(user)
@@ -1616,7 +1661,8 @@ async function bootApp(user) {
       console.info('[boot] Purged prior owner\'s local drafts on cold-start.')
       return
     }
-    // Only 'match' or 'assigned' reach here.
+    // 'stale': a newer sign-in or a sign-out replaced this resolution.
+    if (outcome !== 'match' && outcome !== 'assigned') return
 
     const pending = await loadImportSessions()
     if (pending.length) {
@@ -2309,6 +2355,9 @@ async function init() {
       // Bump the transition generation FIRST so any in-flight resolution
       // for the previous user is rejected as stale before touching DOM.
       beginAccountTransition()
+      // A pending local-ownership resolution for the signed-out user must not
+      // purge or claim data after this point.
+      _invalidatePendingOwnership()
       // Synchronously blank prior-user DOM before any await — no A content
       // may survive after this line, and none of the following awaits may
       // paint it back.

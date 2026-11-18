@@ -527,3 +527,18 @@ test('an account transition closes a location picker opened for the previous acc
   assert.equal(pickerLayer().items.length, 0, 'its original coordinate is no longer drawn')
   assert.equal(saved, null, 'nothing was saved')
 })
+
+test('a picker requested before an account transition does not open after it', async () => {
+  const { isMapLocationPickerActive } = mapModule
+  const { openMapLocationPickerScreen, resetMapForAccountTransition } = await import('../map-loader.js')
+  const { beginAccountTransition } = await import('../account-transition.js')
+  resetMapForAccountTransition()
+  let saved = null
+  const opening = openMapLocationPickerScreen({ lat: 63.43, lon: 10.39, onSave: coords => { saved = coords } })
+  // The account changes while the loader is still awaiting the map module.
+  beginAccountTransition()
+  await opening
+  await _settle()
+  assert.equal(isMapLocationPickerActive(), false)
+  assert.equal(saved, null)
+})

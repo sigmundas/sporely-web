@@ -1,3 +1,5 @@
+import { currentAccountGeneration } from './account-transition.js'
+
 let mapModulePromise = null
 let mapModule = null
 let mapInitialized = false
@@ -44,7 +46,11 @@ export async function loadMapScreen() {
  * @param {{ id: string|number, lat: unknown, lon: unknown, ownerId?: string|null }} target
  */
 export async function focusObservationOnMapScreen(target) {
+  // Leaflet may still be loading: a focus requested by the previous account
+  // must not land after an account transition.
+  const generation = currentAccountGeneration()
   const module = await ensureMapModule()
+  if (generation !== currentAccountGeneration()) return undefined
   return module.focusObservationOnMap(target)
 }
 
@@ -55,6 +61,10 @@ export async function focusObservationOnMapScreen(target) {
  * @param {{ lat?: unknown, lon?: unknown, onSave: (coords: { lat: number, lon: number }) => unknown }} options
  */
 export async function openMapLocationPickerScreen(options) {
+  // Same as focus: never open the previous account's picker (its coordinate
+  // and save callback) after an account transition.
+  const generation = currentAccountGeneration()
   const module = await ensureMapModule()
+  if (generation !== currentAccountGeneration()) return undefined
   return module.openMapLocationPicker(options)
 }
