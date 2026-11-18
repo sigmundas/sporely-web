@@ -387,7 +387,39 @@ async function _loadStoredSession(storageImpl) {
   })
 }
 
-async function _persistSession(session, storageImpl) {
+// Account isolation. The stored session belongs to whichever Sporely account
+// linked it, but its keys carry no Sporely user id. `forgetInaturalistSession`
+// bumps this generation synchronously, so a refresh or login that started
+// before the forget cannot write the old account's tokens back afterwards.
+let _forgetGeneration = 0
+// Set when the session could not be removed for an account change: the
+// tokens stay unreadable for the rest of this page load.
+let _sessionBlocked = false
+
+export function blockInaturalistSessionForThisPageLoad() {
+  _sessionBlocked = true
+}
+
+export function inaturalistSessionGeneration() {
+  return _forgetGeneration
+}
+
+// Whether any iNaturalist credential is stored on this device, read without
+// refreshing anything. Used to treat a pre-ownership session as unowned.
+export async function hasStoredInaturalistSession(storageImpl) {
+  const session = await _loadStoredSession(storageImpl)
+  return Boolean(
+    _cleanString(session.access_token)
+    || _cleanString(session.refresh_token)
+    || _cleanString(session.api_token),
+  )
+}
+
+async function _persistSession(session, storageImpl, generation = _forgetGeneration) {
+  if (generation !== _forgetGeneration) {
+    // The session was forgotten while this write was in flight.
+    return false
+  }
   const storage = _storageFor(storageImpl)
   await Promise.all([
     _writeStorageValue(storage, INAT_ACCESS_TOKEN_KEY, session.access_token ?? ''),
@@ -402,10 +434,19 @@ async function _persistSession(session, storageImpl) {
     _writeStorageValue(storage, INAT_REDIRECT_URI_KEY, session.redirect_uri ?? ''),
     _writeStorageValue(storage, INAT_PLATFORM_KEY, session.platform ?? ''),
   ])
+  // A complete new session overwrote whatever could not be removed before.
+  _sessionBlocked = false
+  return true
 }
 
-export async function persistInaturalistSession(session, storageImpl) {
-  await _persistSession(session, storageImpl)
+export async function persistInaturalistSession(session, storageImpl, generation = _forgetGeneration) {
+  return _persistSession(session, storageImpl, generation)
+}
+
+function _assertNotForgotten(generation) {
+  if (generation !== _forgetGeneration) {
+    throw new Error('iNaturalist sign-in was cancelled because the Sporely account changed.')
+  }
 }
 
 export function normalizeCapgoOAuth2Result(pluginResult) {
@@ -547,6 +588,7 @@ export async function fetchInaturalistApiToken(accessToken, fetchImpl = _default
 }
 
 export async function completeNativeInaturalistLogin(pluginResult, options = {}) {
+  const generation = _forgetGeneration
   const normalized = normalizeCapgoOAuth2Result(pluginResult)
   const accessToken = _cleanString(normalized.access_token)
   if (!accessToken) {
@@ -599,7 +641,8 @@ export async function completeNativeInaturalistLogin(pluginResult, options = {})
     hasApiToken: true,
     hasUsername: Boolean(profile.login),
   })
-  await persistInaturalistSession(session, storage)
+  _assertNotForgotten(generation)
+  await persistInaturalistSession(session, storage, generation)
   const readbackApiToken = await _readStorageValue(storage, INAT_API_TOKEN_KEY)
   const readbackUsername = await _readStorageValue(storage, INAT_USERNAME_KEY)
   _debugInatOAuth(`session persisted to ${storage.kind}: api_token=${Boolean(readbackApiToken)} username=${Boolean(readbackUsername)}`, {
@@ -695,7 +738,7 @@ export function resetInaturalistOAuthStateForTests() {
   resetNativeOAuthStateForTests()
 }
 
-async function _refreshAccessTokenIfNeeded(session, storageImpl, fetchImpl = _defaultFetch()) {
+async function _refreshAccessTokenIfNeeded(session, storageImpl, fetchImpl = _defaultFetch(), generation = _forgetGeneration) {
   const accessToken = _cleanString(session.access_token)
   const refreshToken = _cleanString(session.refresh_token)
   if (accessToken && !_isExpired(session.expires_at)) {
@@ -745,7 +788,7 @@ async function _refreshAccessTokenIfNeeded(session, storageImpl, fetchImpl = _de
       redirect_uri: redirectUri,
       platform,
     }
-    await _persistSession(nextSession, storageImpl)
+    await _persistSession(nextSession, storageImpl, generation)
     return nextSession
   } catch (error) {
     console.warn('iNaturalist access token refresh failed:', error)
@@ -753,7 +796,7 @@ async function _refreshAccessTokenIfNeeded(session, storageImpl, fetchImpl = _de
   }
 }
 
-async function _refreshApiTokenIfNeeded(session, storageImpl, fetchImpl = _defaultFetch()) {
+async function _refreshApiTokenIfNeeded(session, storageImpl, fetchImpl = _defaultFetch(), generation = _forgetGeneration) {
   const apiToken = _cleanString(session.api_token)
   if (apiToken && !_isExpired(session.api_token_expires_at)) {
     return session
@@ -782,7 +825,7 @@ async function _refreshApiTokenIfNeeded(session, storageImpl, fetchImpl = _defau
       api_token_created_at: createdAt,
       api_token_expires_at: createdAt + API_TOKEN_LIFETIME_MS,
     }
-    await _persistSession(nextSession, storageImpl)
+    await _persistSession(nextSession, storageImpl, generation)
     return nextSession
   } catch (error) {
     console.warn('iNaturalist API token refresh failed:', error)
@@ -913,12 +956,16 @@ export async function buildInaturalistAuthorizationUrl(options = {}) {
 }
 
 export async function loadInaturalistSession(storageImpl, options = {}) {
+  if (_sessionBlocked) return _normalizeSessionShape({})
+  const generation = _forgetGeneration
   let session = await _loadStoredSession(storageImpl)
   const fetchImpl = options.fetchImpl || _defaultFetch()
 
-  session = await _refreshAccessTokenIfNeeded(session, storageImpl, fetchImpl)
-  session = await _refreshApiTokenIfNeeded(session, storageImpl, fetchImpl)
+  session = await _refreshAccessTokenIfNeeded(session, storageImpl, fetchImpl, generation)
+  session = await _refreshApiTokenIfNeeded(session, storageImpl, fetchImpl, generation)
 
+  // Forgotten (or blocked) while loading: never hand the old session out.
+  if (generation !== _forgetGeneration || _sessionBlocked) return _normalizeSessionShape({})
   return _normalizeSessionShape(session)
 }
 
@@ -946,6 +993,7 @@ export async function completeInaturalistOAuthCallback(input, stateOrOptions, ma
   if (!code || !state) {
     throw new Error('iNaturalist OAuth callback is missing code or state.')
   }
+  const generation = _forgetGeneration
 
   const storage = _storageFor(options.storage)
   const pendingState = await loadInatPendingState(storage)
@@ -1008,7 +1056,8 @@ export async function completeInaturalistOAuthCallback(input, stateOrOptions, ma
     platform: pendingState.platform || _platformConfig(_normalizePlatform(pendingState.platform)).platform,
   }
 
-  await _persistSession(nextSession, storage)
+  _assertNotForgotten(generation)
+  await _persistSession(nextSession, storage, generation)
   await clearInatPendingState(storage)
   return _normalizeSessionShape(nextSession)
 }
@@ -1100,6 +1149,7 @@ export async function parseInaturalistCallbackUrl(url, options = {}) {
 }
 
 export async function forgetInaturalistSession() {
+  _forgetGeneration += 1
   const storage = _storageFor()
   await Promise.all(SUCCESSFUL_SESSION_KEYS.map(key => removeInatItem(key, storage)))
   await clearInatPendingState(storage)

@@ -512,3 +512,18 @@ test('a map load that resolves after an account switch paints nothing', async ()
 
   assert.equal(clusterLayer().items.length, 0, 'user 1\'s rows must not be painted for user 2')
 })
+
+test('an account transition closes a location picker opened for the previous account', async () => {
+  const { openMapLocationPicker, isMapLocationPickerActive } = mapModule
+  const { resetMapForAccountTransition } = await import('../map-loader.js')
+  let saved = null
+  openMapLocationPicker({ lat: 63.43, lon: 10.39, onSave: coords => { saved = coords } })
+  await _settle()
+  assert.equal(isMapLocationPickerActive(), true, 'precondition: picker open')
+
+  resetMapForAccountTransition()
+
+  assert.equal(isMapLocationPickerActive(), false, 'the previous account\'s picker and save callback are dropped')
+  assert.equal(pickerLayer().items.length, 0, 'its original coordinate is no longer drawn')
+  assert.equal(saved, null, 'nothing was saved')
+})

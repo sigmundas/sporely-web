@@ -546,6 +546,11 @@ export function resetMapForAccountTransition() {
   _markersById.clear()
   _pendingFocus = null
   _focusReturn = null
+  // A picker open for the previous account holds its find's coordinate and
+  // its save callback; drop both without navigating.
+  _locationPicker = null
+  pickerLayer?.clearLayers()
+  _syncLocationPickerUi()
 }
 
 export async function loadMap() {

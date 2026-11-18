@@ -465,15 +465,45 @@ test('account isolation: the shared purge forgets the linked iNaturalist session
     'iNaturalist tokens are stored under keys with no Sporely user id, so the purge that runs on sign-out, account switch and owner mismatch must drop them')
 })
 
-test('account isolation: first boot resolves draft ownership instead of overwriting the marker', () => {
+test('account isolation: sign-in without a switch resolves ownership instead of overwriting the marker', () => {
   const body = _extractFunctionBody(mainSource, 'async function _ensureAppReadyForUser(')
   const elseIdx = body.indexOf('} else {')
   assert.ok(elseIdx > 0)
-  const firstBoot = body.slice(elseIdx)
-  assert.match(firstBoot, /resolveLocalDataOwner\(user\.id, _purgeUserDrafts/,
-    'first boot must purge a previous owner\'s drafts on mismatch')
-  assert.doesNotMatch(firstBoot, /setLocalDataOwner\(/,
+  const nonSwitch = body.slice(elseIdx)
+  assert.match(nonSwitch, /_ownershipReady = _resolveLocalOwnershipForBoot\(user\)/,
+    'every non-switch sign-in (first boot, or after a sign-out on the same page) must resolve ownership')
+  assert.doesNotMatch(nonSwitch, /setLocalDataOwner\(/,
     'overwriting the marker before the restore step makes a previous account\'s drafts look like this user\'s')
+  assert.doesNotMatch(nonSwitch, /await _resolveLocalOwnershipForBoot/,
+    'ownership resolution reads IndexedDB and must stay off the reveal path')
+})
+
+test('account isolation: ownership resolution purges unowned iNaturalist sessions and blocks on failure', () => {
+  const resolver = _extractFunctionBody(mainSource, 'async function _resolveLocalOwnershipForBoot(')
+  assert.match(resolver, /resolveLocalDataOwner\(user\.id, _purgeUserDrafts, \{ hasLegacyData: _hasUnownedLocalData \}\)/)
+  assert.match(resolver, /blockInaturalistSessionForThisPageLoad\(\)/)
+  const unowned = _extractFunctionBody(mainSource, 'async function _hasUnownedLocalData(')
+  assert.match(unowned, /hasStoredInaturalistSession\(\)/,
+    'a session left by an account that signed out before the purge covered iNaturalist must count as unowned')
+})
+
+test('account isolation: iNaturalist UI and draft restore wait for ownership', () => {
+  const body = _extractFunctionBody(mainSource, 'async function bootApp(')
+  const inatIdx = body.indexOf("runBootStep('inaturalist-ui'")
+  assert.ok(inatIdx > 0)
+  const inatStep = body.slice(inatIdx, inatIdx + 200)
+  assert.ok(inatStep.indexOf('await ownershipReady') >= 0 && inatStep.indexOf('await ownershipReady') < inatStep.indexOf('_syncInaturalistUi()'))
+  const restoreIdx = body.indexOf("runBootStep('pending-import-restore'")
+  assert.match(body.slice(restoreIdx), /const \{ outcome \} = await ownershipReady/)
+})
+
+test('account isolation: a failed sign-out or switch purge blocks the iNaturalist session', () => {
+  const signedOut = mainSource.slice(mainSource.indexOf("event === 'SIGNED_OUT'"))
+  const catchIdx = signedOut.indexOf('purgeOk = false')
+  assert.ok(catchIdx > 0)
+  assert.match(signedOut.slice(catchIdx, catchIdx + 120), /blockInaturalistSessionForThisPageLoad\(\)/)
+  const ensure = _extractFunctionBody(mainSource, 'async function _ensureAppReadyForUser(')
+  assert.match(ensure, /catch \(err\) \{\s*blockInaturalistSessionForThisPageLoad\(\)\s*throw err/)
 })
 
 test('account isolation: every account-transition UI wipe also resets the map', () => {
