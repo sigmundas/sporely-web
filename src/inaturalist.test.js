@@ -1007,3 +1007,29 @@ test('native login cancelled by an account change while the OAuth prompt is open
     runtime.restore()
   }
 })
+
+test('a link write still in flight when the session is forgotten is undone', async () => {
+  const data = new Map()
+  let releaseWrites
+  const writeGate = new Promise(resolve => { releaseWrites = resolve })
+  // Capacitor Preferences-shaped: asynchronous writes the module awaits.
+  const slowStorage = {
+    async get({ key }) { return { value: data.has(key) ? data.get(key) : null } },
+    async set({ key, value }) { await writeGate; data.set(key, String(value)) },
+    async remove({ key }) { data.delete(key) },
+  }
+  const runtime = createRuntimeStorageMocks({ platform: 'web', native: false })
+  try {
+    const writing = persistInaturalistSession({ ..._expiredWebSession(), expires_at: Date.now() + 60_000 }, slowStorage)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    // Account A signs out while the writes are still pending.
+    await forgetInaturalistSession()
+    releaseWrites()
+    assert.equal(await writing, false)
+    assert.equal(data.get(INAT_ACCESS_TOKEN_KEY) ?? '', '', 'the late write was rolled back')
+    assert.equal(data.get(INAT_REFRESH_TOKEN_KEY) ?? '', '')
+  } finally {
+    await forgetInaturalistSession()
+    runtime.restore()
+  }
+})

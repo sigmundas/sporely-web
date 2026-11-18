@@ -472,12 +472,21 @@ test('account isolation: sign-in without a switch resolves ownership instead of 
   const nonSwitch = body.slice(elseIdx)
   assert.match(nonSwitch, /const resolution = _resolveLocalOwnershipForBoot\(user\)/,
     'every non-switch sign-in (first boot, or after a sign-out on the same page) must resolve ownership')
-  assert.match(nonSwitch, /await _awaitOwnershipWithinBudget\(resolution\)/,
-    'the marker must normally be in place before the reveal (cached boot and connectivity checks read it)')
+  assert.match(nonSwitch, /const \{ outcome \} = await resolution/,
+    'the marker must be in place before the reveal (cached boot and connectivity checks read it)')
+  assert.match(nonSwitch, /if \(outcome === 'stale'\) return/,
+    'a superseded sign-in must not overwrite state.user')
+  assert.ok(nonSwitch.indexOf("if (outcome === 'stale') return") < nonSwitch.indexOf('state.user = user'))
   assert.doesNotMatch(nonSwitch, /setLocalDataOwner\(/,
     'overwriting the marker before the restore step makes a previous account\'s drafts look like this user\'s')
-  const budget = mainSource.match(/OWNERSHIP_RESOLVE_BUDGET_MS = (\d+)/)
-  assert.ok(budget && Number(budget[1]) <= 2000, 'a stalled IndexedDB must not hold the reveal for long')
+})
+
+test('account isolation: every sign-in repaints the iNaturalist link state', () => {
+  const body = _extractFunctionBody(mainSource, 'async function _ensureAppReadyForUser(')
+  const bootIdx = body.indexOf('await bootApp(user)')
+  assert.ok(bootIdx > 0)
+  assert.match(body.slice(bootIdx), /_syncInaturalistUi\(\)/,
+    'bootApp returns early after the first sign-in, so later sign-ins must resync the link buttons themselves')
 })
 
 test('account isolation: superseded ownership resolutions are invalidated', () => {

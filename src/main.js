@@ -92,7 +92,6 @@ import {
   hasStoredInaturalistSession,
   inaturalistLinkEpoch,
   loadInaturalistSession,
-  unblockInaturalistSession,
   maybeHandleInaturalistOAuthReturn,
 } from './inaturalist.js'
 import { syncIdentifyButtonLabels } from './identify.js'
@@ -937,11 +936,6 @@ async function _hasUnownedLocalData() {
 // this page load unless the user links a new one meanwhile.
 let _ownershipReady = null
 let _ownershipToken = 0
-// Ownership is resolved before the reveal so the marker is in place for the
-// cached-boot and connectivity checks. A stalled IndexedDB must not hold the
-// reveal, though: past this budget the app reveals with the stored
-// iNaturalist session blocked until ownership settles.
-const OWNERSHIP_RESOLVE_BUDGET_MS = 1500
 
 function _invalidatePendingOwnership() {
   _ownershipToken += 1
@@ -966,24 +960,6 @@ async function _resolveLocalOwnershipForBoot(user) {
   return result
 }
 
-function _ownershipSettled(outcome) {
-  return outcome === 'match' || outcome === 'assigned' || outcome === 'purged'
-}
-
-async function _awaitOwnershipWithinBudget(resolution) {
-  let timer = null
-  const timedOut = new Promise(resolve => {
-    timer = setTimeout(() => resolve({ outcome: 'timeout' }), OWNERSHIP_RESOLVE_BUDGET_MS)
-  })
-  const result = await Promise.race([resolution, timedOut])
-  clearTimeout(timer)
-  if (result.outcome !== 'timeout') return
-  console.warn('[boot] Ownership resolution exceeded its budget; iNaturalist stays blocked until it settles.')
-  blockInaturalistSessionForThisPageLoad()
-  void resolution.then(late => {
-    if (_ownershipSettled(late.outcome)) unblockInaturalistSession()
-  })
-}
 
 async function _clearInMemoryUserState() {
   // In-memory media URL cache (Supabase signed URLs).
@@ -1551,14 +1527,23 @@ async function _ensureAppReadyForUser(user) {
     // marker is deliberately NOT overwritten: it may still name a previous
     // account whose purge never ran or failed. Overwriting it first made the
     // draft restore see a 'match' and reveal that account's drafts. Ownership
-    // is resolved (purging on mismatch) within a short budget instead; the
-    // draft restore and the iNaturalist UI wait for the full resolution.
+    // is resolved (purging on mismatch) before the reveal instead, so the
+    // marker is in place for the cached-boot and connectivity checks. This
+    // only reads IndexedDB when there is no marker or a mismatch, as the
+    // account-switch purge above already does.
     const resolution = _resolveLocalOwnershipForBoot(user)
     _ownershipReady = resolution
-    await _awaitOwnershipWithinBudget(resolution)
+    const { outcome } = await resolution
+    // A sign-out or a newer sign-in replaced this one while it resolved:
+    // leave state.user alone; the caller discards the stale transition.
+    if (outcome === 'stale') return
   }
   state.user = user
   await bootApp(user)
+  // bootApp only wires screens on the first sign-in of a page load; later
+  // sign-ins must still repaint the iNaturalist link state, which the
+  // previous account's sign-out purge may have changed.
+  void _syncInaturalistUi()
 }
 
 async function bootApp(user) {

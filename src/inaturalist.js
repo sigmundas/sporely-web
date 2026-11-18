@@ -421,10 +421,6 @@ export function blockInaturalistSessionForThisPageLoad({ unlessLinkedSince } = {
   _forgetGeneration += 1
 }
 
-/** Lift a block once ownership of the stored session has been settled. */
-export function unblockInaturalistSession() {
-  _sessionBlocked = false
-}
 
 // Whether any iNaturalist credential is stored on this device, read without
 // refreshing anything. Used to treat a pre-ownership session as unowned.
@@ -461,6 +457,12 @@ async function _persistSession(session, storageImpl, generation = _forgetGenerat
     _writeStorageValue(storage, INAT_REDIRECT_URI_KEY, session.redirect_uri ?? ''),
     _writeStorageValue(storage, INAT_PLATFORM_KEY, session.platform ?? ''),
   ])
+  if (generation !== _forgetGeneration) {
+    // Forgotten or blocked while the writes were in flight: undo them, so
+    // the old account's tokens do not outlive the forget.
+    await Promise.all(SUCCESSFUL_SESSION_KEYS.map(key => removeInatItem(key, storage)))
+    return false
+  }
   if (explicitLink) {
     // A complete new session overwrote whatever could not be removed before.
     _sessionBlocked = false
