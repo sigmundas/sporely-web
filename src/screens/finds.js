@@ -3001,16 +3001,19 @@ export function findsCardIdentityPresentation(obs = {}) {
   const isUnknown = isObservationUnidentified(obs)
   const displayName = obs.common_name || latin || t('finds.unidentified')
   const uncertainPrefix = _uncertainPrefix(obs)
+  // Names are owner-editable observation text shown to other users: escape.
+  const commonHtml = _esc(obs.common_name)
+  const latinHtml = _esc(latin)
   const nameInnerHtml = isUnknown
     ? `${uncertainPrefix}${t('finds.unidentified')}`
     : obs.common_name && latin
-      ? `${uncertainPrefix}${obs.common_name} &mdash; <em class="find-card-scientific">${latin}</em>`
+      ? `${uncertainPrefix}${commonHtml} &mdash; <em class="find-card-scientific">${latinHtml}</em>`
       : obs.common_name
-        ? `${uncertainPrefix}${obs.common_name}`
-        : `${uncertainPrefix}<em class="find-card-scientific">${latin}</em>`
+        ? `${uncertainPrefix}${commonHtml}`
+        : `${uncertainPrefix}<em class="find-card-scientific">${latinHtml}</em>`
   const compactInnerHtml = isUnknown
     ? `${uncertainPrefix}${t('finds.unidentified')}`
-    : `${uncertainPrefix}${displayName}`
+    : `${uncertainPrefix}${_esc(displayName)}`
   const unknownClass = isUnknown ? ' unidentified' : ''
   const nameHtml = `<span class="find-card-name${unknownClass}">${nameInnerHtml}</span>`
   const compactNameHtml =
@@ -3972,7 +3975,7 @@ async function _renderTiles(list, data, options = {}) {
       )
       html += `<div class="find-tile" data-id="${obs.id}">
         <div class="find-tile-photo">${photo}${renderFindsRedlistTag(obs)}${_draftBadge(obs)}${_authorChip(obs, { sizeClass: 'observation-author-chip--tile' })}</div>
-        <div class="find-tile-name">${obs.uncertain ? '? ' : ''}${name}</div>
+        <div class="find-tile-name">${obs.uncertain ? '? ' : ''}${_esc(name)}</div>
       </div>`
     })
     html += '</div>'

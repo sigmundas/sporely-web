@@ -4981,3 +4981,27 @@ test('the card signature comes from the rendered markup, so detection cannot dri
   assert.ok(identified.nameInnerHtml.includes('Entoloma conferendum'))
   assert.ok(/^[ui][0-9a-z]+$/.test(identified.signature), 'the signature is attribute-safe')
 })
+
+test('card names escape owner-entered observation text', () => {
+  const payload = '<img src=x onerror=alert(1)>'
+  const both = findsCardIdentityPresentation({
+    id: 1, genus: 'Entoloma<b>', species: 'x', common_name: payload,
+  })
+  const commonOnly = findsCardIdentityPresentation({ id: 1, common_name: payload })
+  for (const html of [both.nameInnerHtml, both.compactInnerHtml, both.nameHtml, commonOnly.nameInnerHtml, commonOnly.compactInnerHtml]) {
+    assert.ok(!html.includes('<img'), `raw markup must not survive: ${html}`)
+    assert.ok(!html.includes('<b>'), `raw markup must not survive: ${html}`)
+  }
+  assert.ok(both.nameInnerHtml.includes('&lt;img src=x onerror=alert(1)&gt;'))
+  assert.ok(both.nameInnerHtml.includes('<em class="find-card-scientific">Entoloma&lt;b&gt; x</em>'))
+  // Plain names render exactly as before.
+  assert.equal(
+    findsCardIdentityPresentation({ id: 1, common_name: 'kraghätting' }).compactInnerHtml,
+    'kraghätting',
+  )
+})
+
+test('species tiles escape the observation name', () => {
+  const source = readFileSync(new URL('./finds.js', import.meta.url), 'utf8')
+  assert.match(source, /<div class="find-tile-name">\$\{obs\.uncertain \? '\? ' : ''\}\$\{_esc\(name\)\}<\/div>/)
+})

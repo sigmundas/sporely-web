@@ -139,3 +139,17 @@ test('_compareRecentFinds orders by date, then own upload time, then id', () => 
   ]
   assert.deepEqual([...rows].sort(_compareRecentFinds).map(row => row.id), [4, 3, 1, 2, 5, 6])
 })
+
+test('recent find rows escape owner-entered name, scientific name and location', async () => {
+  const { recentFindRowHtmlForTests } = await import('./home.js')
+  const payload = '<img src=x onerror=alert(1)>'
+  const html = recentFindRowHtmlForTests({
+    id: 7, _owner: 'friend', user_id: 'someone-else', common_name: payload,
+    genus: 'Amanita<b>', species: 'muscaria', location: '<svg onload=alert(2)>',
+  })
+  assert.ok(!html.includes('<img'), html)
+  assert.ok(!html.includes('<b>'), html)
+  assert.ok(!html.includes('<svg onload'), html)
+  assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt;'))
+  assert.ok(html.includes('&lt;svg onload=alert(2)&gt;'))
+})
