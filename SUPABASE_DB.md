@@ -93,6 +93,7 @@ This repository owns the W2–W5 cloud and web implementation described there.
   - Populated with ~110k taxa + ~70k vernacular names
 - `search_taxa` (RPC)
   - Deployed and used by the web app for autocomplete/search
+  - Legacy fallback for `search_taxa_v2`. Since `20261119120000` it pins `search_path` and clamps `lim` to 1..50 (NULL means 20), like `search_taxa_v2`
 
 #### Taxonomy v2 experiments and approved sparse direction (not used by clients)
 
