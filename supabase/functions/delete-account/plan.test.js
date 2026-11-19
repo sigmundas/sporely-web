@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 import {
+  SNAPSHOT_PAGE_SIZE,
   requireSuccess,
   runDeletionPlan,
   STAGES,
@@ -166,7 +167,16 @@ function fakeAdmin(overrides = {}) {
     const settle = () => {
       calls.push({ table: chain._table, op: chain._op, filters: [...chain._filters] })
       const override = overrides.tableResponses?.[chain._table]?.[chain._op]
-      if (override) return Promise.resolve(override(chain))
+      if (override) {
+        const result = override(chain)
+        // Like PostgREST, a ranged select returns only that slice of the
+        // override's rows (unless the override already pages itself).
+        const range = chain._filters.find(f => f.method === 'range')
+        if (range && !override.ranged && Array.isArray(result?.data)) {
+          return Promise.resolve({ ...result, data: result.data.slice(range.from, range.to + 1) })
+        }
+        return Promise.resolve(result)
+      }
       return Promise.resolve({ data: [], error: null })
     }
     const builder = {
@@ -182,6 +192,8 @@ function fakeAdmin(overrides = {}) {
       then: (res, rej) => settle().then(res, rej),
       eq: (col, val) => { chain._filters.push({ method: 'eq', col, val }); return _thenable() },
       or: (expr) => { chain._filters.push({ method: 'or', expr }); return _thenable() },
+      order: (col, opts) => { chain._filters.push({ method: 'order', col, opts }); return _thenable() },
+      range: (from, to) => { chain._filters.push({ method: 'range', from, to }); return _thenable() },
     })
     return builder
   }
@@ -194,7 +206,7 @@ function fakeAdmin(overrides = {}) {
       if (override) return Promise.resolve(override(params))
       return Promise.resolve({ data: null, error: null })
     },
-    storage: {
+    storage: overrides.storage || {
       from: () => ({
         list: async () => (overrides.storageListError ? { data: null, error: { message: overrides.storageListError } } : { data: [], error: null }),
         remove: async () => ({ data: null, error: null }),
@@ -673,4 +685,115 @@ test('STRUCTURAL: delete_follows source uses target_type + target_id together, n
   const bareMatches = followsBlock.match(bareTargetId) || []
   assert.equal(bareMatches.length, targetIdCalls.length,
     'every follows.target_id filter must be preceded by target_type=user')
+})
+
+// ── Pagination ──────────────────────────────────────────────────────
+
+// Serves `rows` the way PostgREST does: a ranged select returns that slice,
+// capped at `maxRows` (the server's max_rows), and an unranged one is capped
+// at maxRows too.
+function pagedSelect(rows, maxRows = SNAPSHOT_PAGE_SIZE) {
+  const pages = []
+  const respond = chain => {
+    const range = chain._filters.find(f => f.method === 'range')
+    const from = range ? range.from : 0
+    const to = range ? range.to : rows.length - 1
+    pages.push({ from, to })
+    return { data: rows.slice(from, Math.min(to + 1, from + maxRows)), error: null }
+  }
+  respond.ranged = true
+  return { respond, pages }
+}
+
+test('media_snapshot reads every observation image page, past the max_rows cap', async () => {
+  const images = Array.from({ length: 2 * SNAPSHOT_PAGE_SIZE + 5 }, (_, i) => ({
+    storage_path: `${UID}/obs/${i}.webp`,
+    original_storage_path: i % 1000 === 7 ? `${UID}/obs/orig_${i}.heic` : null,
+  }))
+  const imagePages = pagedSelect(images)
+  const admin = fakeAdmin({ tableResponses: { observation_images: { select: imagePages.respond } } })
+  const worker = fakeWorker()
+  const result = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+  assert.equal(result.ok, true)
+  const last = images.length - 1
+  assert.ok(worker.deleted.includes(`${UID}/obs/${last}.webp`), 'last page image must be deleted')
+  assert.ok(worker.deleted.includes(`${UID}/obs/thumb_${last}.webp`))
+  assert.ok(worker.deleted.includes(`${UID}/obs/orig_1007.heic`), 'originals on later pages must be deleted')
+  assert.deepEqual(imagePages.pages.map(p => p.from), [0, 1000, 2000, 2005])
+  const selects = admin._calls.filter(c => c.table === 'observation_images' && c.op === 'select')
+  for (const call of selects) {
+    assert.ok(call.filters.some(f => f.method === 'order' && f.col === 'id'), 'pages must be ordered by id')
+  }
+})
+
+test('media_snapshot keeps paging when the server max_rows is below the page size', async () => {
+  const images = Array.from({ length: 1200 }, (_, i) => ({ storage_path: `${UID}/obs/${i}.webp` }))
+  const imagePages = pagedSelect(images, 500)
+  const admin = fakeAdmin({ tableResponses: { observation_images: { select: imagePages.respond } } })
+  const worker = fakeWorker()
+  const result = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+  assert.equal(result.ok, true)
+  assert.ok(worker.deleted.includes(`${UID}/obs/1199.webp`))
+  assert.deepEqual(imagePages.pages.map(p => p.from), [0, 500, 1000, 1200])
+})
+
+test('mosaic_media_snapshot reads every mosaic page', async () => {
+  const mosaics = Array.from({ length: SNAPSHOT_PAGE_SIZE + 3 }, (_, i) => ({ storage_key: `${UID}/m/${i}.webp` }))
+  const mosaicPages = pagedSelect(mosaics)
+  const admin = fakeAdmin({ tableResponses: { spore_measurement_mosaics: { select: mosaicPages.respond } } })
+  const worker = fakeWorker()
+  const result = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+  assert.equal(result.ok, true)
+  assert.ok(worker.deleted.includes(`${UID}/m/${mosaics.length - 1}.webp`))
+})
+
+test('delete_legacy_storage removes every file when a folder holds more than one listing page', async () => {
+  // A Storage bucket that lists sorted by name and drops removed files from
+  // later listings, like Supabase Storage.
+  const buckets = {
+    'observation-images': new Set([
+      ...Array.from({ length: 2500 }, (_, i) => `${UID}/f${String(i).padStart(5, '0')}.jpg`),
+      ...Array.from({ length: 3 }, (_, i) => `${UID}/sub/s${i}.jpg`),
+    ]),
+    avatars: new Set([`${UID}/avatar.jpg`]),
+  }
+  const storage = {
+    from: bucket => ({
+      list: async (path, { limit, offset }) => {
+        const prefix = `${path}/`
+        const entries = new Map()
+        for (const key of buckets[bucket]) {
+          if (!key.startsWith(prefix)) continue
+          const rest = key.slice(prefix.length)
+          const [head, ...tail] = rest.split('/')
+          if (tail.length) entries.set(head, { name: head, id: null })
+          else entries.set(head, { name: head, id: `id-${key}` })
+        }
+        const sorted = [...entries.values()].sort((a, b) => a.name.localeCompare(b.name))
+        return { data: sorted.slice(offset, offset + limit), error: null }
+      },
+      remove: async keys => {
+        for (const key of keys) buckets[bucket].delete(key)
+        return { data: null, error: null }
+      },
+    }),
+  }
+  const admin = fakeAdmin({ storage })
+  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set() })
+  assert.equal(result.ok, true)
+  assert.deepEqual([...buckets['observation-images']], [])
+  assert.deepEqual([...buckets.avatars], [])
+})
+
+test('media_snapshot fails closed if the server ignores the range', async () => {
+  // A select that always returns a full page would otherwise loop forever.
+  const fullPage = Array.from({ length: SNAPSHOT_PAGE_SIZE }, (_, i) => ({ storage_path: `${UID}/obs/${i}.webp` }))
+  const respond = () => ({ data: fullPage, error: null })
+  respond.ranged = true
+  const admin = fakeAdmin({ tableResponses: { observation_images: { select: respond } } })
+  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set() })
+  assert.equal(result.ok, false)
+  assert.equal(result.stage, 'media_snapshot')
+  assert.match(result.error, /page limit/)
+  assert.equal(admin._calls.some(c => c.op === 'deleteUser'), false)
 })
