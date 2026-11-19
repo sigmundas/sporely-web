@@ -19,7 +19,8 @@
 //                                   R2 keys BEFORE their DB rows are deleted.
 //                                   Mosaics have no separate thumb variant.
 //   3. delete_r2_media           — delete each snapshotted R2 media object
-//                                   (observation + mosaic keys). 404 = success.
+//                                   (observation + mosaic keys), at most
+//                                   R2_DELETE_CONCURRENCY at once. 404 = success.
 //                                   The upload worker attempts both the
 //                                   legacy public bucket AND the private
 //                                   bucket for each key.
@@ -105,6 +106,33 @@ function assertSnapshotPageLimit(label, pages) {
   if (pages >= SNAPSHOT_MAX_PAGES) {
     throw new Error(`${label}: snapshot exceeded the page limit`)
   }
+}
+
+// Worker DELETE calls in flight at once in delete_r2_media. An account with
+// thousands of images has tens of thousands of R2 keys (each image has up to
+// four variants); serial calls would run far past the Edge Function time
+// limit. Bounded so the upload Worker and R2 are not flooded.
+export const R2_DELETE_CONCURRENCY = 16
+
+/**
+ * Calls `fn` for every item with at most `limit` calls in flight. Resolves
+ * once every call has settled; `fn` must not throw.
+ * @template T
+ * @param {Iterable<T>} items
+ * @param {number} limit
+ * @param {(item: T, index: number) => Promise<void>} fn
+ */
+export async function forEachWithConcurrency(items, limit, fn) {
+  const list = [...items]
+  let next = 0
+  const runner = async () => {
+    while (next < list.length) {
+      const index = next++
+      await fn(list[index], index)
+    }
+  }
+  const runners = Math.max(1, Math.min(limit, list.length))
+  await Promise.all(Array.from({ length: runners }, runner))
 }
 
 // Keyset pagination on the bigint primary key: each page starts after the
@@ -198,16 +226,23 @@ export const STAGES = Object.freeze([
   {
     name: 'delete_r2_media',
     apply: async ctx => {
+      // Every key is attempted, even after a failure; failures are reported
+      // in snapshot order once all deletes have settled.
+      /** @type {(string | undefined)[]} */
       const failures = []
-      for (const key of ctx.r2Keys) {
-        const outcome = await ctx.worker.deleteKey(key)
-        if (!outcome.ok) {
-          // 404 is idempotent success.
-          if (outcome.status === 404) continue
-          failures.push(`r2 delete failed for ${maskKey(key)}: ${outcome.detail || outcome.status || 'unknown'}`)
+      await forEachWithConcurrency(ctx.r2Keys, R2_DELETE_CONCURRENCY, async (key, index) => {
+        let outcome
+        try {
+          outcome = await ctx.worker.deleteKey(key)
+        } catch (err) {
+          outcome = { ok: false, detail: err?.message }
         }
-      }
-      if (failures.length) return { ok: false, error: failures.join('; ') }
+        // 404 is idempotent success.
+        if (outcome.ok || outcome.status === 404) return
+        failures[index] = `r2 delete failed for ${maskKey(key)}: ${outcome.detail || outcome.status || 'unknown'}`
+      })
+      const errors = failures.filter(Boolean)
+      if (errors.length) return { ok: false, error: errors.join('; ') }
       return { ok: true }
     },
   },

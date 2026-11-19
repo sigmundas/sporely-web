@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 
 import {
   SNAPSHOT_PAGE_SIZE,
+  R2_DELETE_CONCURRENCY,
   requireSuccess,
   runDeletionPlan,
   STAGES,
@@ -411,6 +412,101 @@ test('runDeletionPlan: R2 500 fails the stage and preserves the auth user', asyn
   ],
     'a failed key must not prevent remaining snapshotted identities from being attempted')
   assert.equal(admin._calls.find(c => c.op === 'deleteUser'), undefined)
+})
+
+// A worker whose deletes stay pending until the test settles them, so it can
+// observe how many are in flight at once.
+function gatedWorker(statusByKey = {}) {
+  const pending = []
+  const attempted = []
+  let inFlight = 0
+  let maxInFlight = 0
+  return {
+    attempted,
+    pending,
+    maxInFlight: () => maxInFlight,
+    deleteKey(key) {
+      attempted.push(key)
+      inFlight += 1
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      return new Promise(resolve => {
+        pending.push(() => {
+          inFlight -= 1
+          const status = statusByKey[key] ?? 200
+          if (status === 404) resolve({ ok: true, status })
+          else if (status >= 400) resolve({ ok: false, status, detail: `HTTP ${status}` })
+          else resolve({ ok: true, status })
+        })
+      })
+    },
+  }
+}
+
+// Settles pending deletes one microtask turn at a time until the stage ends.
+async function drain(worker, done) {
+  let finished = false
+  done.then(() => { finished = true })
+  while (!finished) {
+    await new Promise(resolve => setImmediate(resolve))
+    while (worker.pending.length) worker.pending.shift()()
+  }
+  return done
+}
+
+function stage(name) {
+  return STAGES.find(s => s.name === name)
+}
+
+test('delete_r2_media never has more than R2_DELETE_CONCURRENCY deletes in flight', async () => {
+  const keys = Array.from({ length: R2_DELETE_CONCURRENCY * 4 + 3 }, (_, i) => `${UID}/obs/${i}.webp`)
+  const worker = gatedWorker()
+  const done = stage('delete_r2_media').apply({ uid: UID, admin: fakeAdmin(), worker, r2Keys: new Set(keys) })
+  // Before anything settles, exactly the limit has started.
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(worker.attempted.length, R2_DELETE_CONCURRENCY)
+  const result = await drain(worker, done)
+  assert.deepEqual(result, { ok: true })
+  assert.equal(worker.maxInFlight(), R2_DELETE_CONCURRENCY)
+  assert.deepEqual([...worker.attempted].sort(), [...keys].sort(), 'every key is attempted exactly once')
+})
+
+test('delete_r2_media attempts every key and reports a failure from the middle', async () => {
+  const keys = Array.from({ length: R2_DELETE_CONCURRENCY * 3 }, (_, i) => `${UID}/obs/${i}.webp`)
+  const failingIndex = R2_DELETE_CONCURRENCY + 5
+  const failing = keys[failingIndex]
+  const worker = gatedWorker({ [failing]: 503, [keys[2]]: 404 })
+  const done = stage('delete_r2_media').apply({ uid: UID, admin: fakeAdmin(), worker, r2Keys: new Set(keys) })
+  const result = await drain(worker, done)
+  assert.equal(result.ok, false)
+  assert.match(result.error, new RegExp(`obs/${failingIndex}\\.webp: HTTP 503`))
+  assert.equal(result.error.split('; ').length, 1, 'only the failed key is reported; 404 is success')
+  assert.doesNotMatch(result.error, new RegExp(UID), 'the account id is masked')
+  assert.deepEqual([...worker.attempted].sort(), [...keys].sort(), 'keys after the failure are still attempted')
+})
+
+test('delete_r2_media reports every failed key, in snapshot order', async () => {
+  const keys = Array.from({ length: 40 }, (_, i) => `${UID}/obs/${i}.webp`)
+  const worker = fakeWorker({ statusByKey: { [keys[3]]: 500, [keys[30]]: 502, [keys[17]]: 403 } })
+  const result = await stage('delete_r2_media').apply({ uid: UID, admin: fakeAdmin(), worker, r2Keys: new Set(keys) })
+  assert.equal(result.ok, false)
+  assert.deepEqual(result.error.split('; ').map(e => e.match(/obs\/(\d+)\.webp/)[1]), ['3', '17', '30'])
+  assert.equal(worker.deleted.length, keys.length)
+})
+
+test('delete_r2_media records a thrown worker error as a failure and keeps going', async () => {
+  const keys = Array.from({ length: 20 }, (_, i) => `${UID}/obs/${i}.webp`)
+  const attempted = []
+  const worker = {
+    async deleteKey(key) {
+      attempted.push(key)
+      if (key === keys[4]) throw new Error('socket hang up')
+      return { ok: true, status: 200 }
+    },
+  }
+  const result = await stage('delete_r2_media').apply({ uid: UID, admin: fakeAdmin(), worker, r2Keys: new Set(keys) })
+  assert.equal(result.ok, false)
+  assert.match(result.error, /obs\/4\.webp: socket hang up/)
+  assert.equal(attempted.length, keys.length)
 })
 
 test('runDeletionPlan: delete_auth_user user_not_found is idempotent success', async () => {
