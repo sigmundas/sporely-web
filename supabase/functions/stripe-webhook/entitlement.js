@@ -10,7 +10,9 @@
 //   * Before and after writing Pro, the payment's charge is re-read. A refund
 //     that landed first (its webhook found no profile to revoke) or while the
 //     write ran is caught by one of the two reads, whatever order the
-//     webhooks arrive in.
+//     webhooks arrive in. A retried checkout that sees the refund revokes
+//     Pro stored for this payment, in case an earlier attempt wrote Pro and
+//     then failed before its post-write check finished.
 //   * Only a full refund revokes Pro; a partial refund keeps it.
 
 /**
@@ -50,7 +52,12 @@ export async function handleCheckoutSessionCompleted(deps, session) {
   const customerId = stripeObjectId(session.customer)
 
   if (await isPaymentFullyRefunded(stripe, paymentId)) {
-    // Write nothing: the profile may hold Pro from another payment or grant.
+    // Do not activate. Revoke only a profile that stores THIS payment: an
+    // earlier attempt may have written Pro and then failed its post-write
+    // check (timeout, revoke error), so Stripe retried. Pro from another
+    // payment or an admin grant has a different billing_payment_id and
+    // is left untouched.
+    await revokeForPayment(admin, paymentId, now)
     console.warn('Skipping activation for a payment that was already refunded:', session.id)
     return { outcome: 'refunded_before_activation' }
   }

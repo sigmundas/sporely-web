@@ -175,6 +175,20 @@ test('a refunded checkout leaves Pro from another payment untouched', async () =
   assert.equal(admin.profiles[0].billing_payment_id, 'pi_0')
 })
 
+test('a checkout retry that sees the refund revokes Pro written by an earlier attempt', async () => {
+  // Attempt 1 wrote Pro for pi_1, then its post-write refund read failed and
+  // the webhook returned 500. Stripe retries after the full refund landed.
+  const admin = fakeAdmin([{ id: USER, cloud_plan: 'pro', is_pro: true, billing_status: 'one_time_active', billing_payment_id: 'pi_1' }])
+  const result = await handleCheckoutSessionCompleted(
+    { stripe: fakeStripe({ refundedReads: [true] }), admin, proPriceId: PRO_PRICE, now: NOW },
+    paidSession(),
+  )
+  assert.equal(result.outcome, 'refunded_before_activation')
+  assert.equal(admin.profiles[0].is_pro, false)
+  assert.equal(admin.profiles[0].cloud_plan, 'free')
+  assert.equal(admin.profiles[0].billing_status, 'one_time_refunded')
+})
+
 test('refund during activation: the post-write check revokes Pro', async () => {
   const admin = fakeAdmin([freeProfile()])
   const result = await handleCheckoutSessionCompleted(
