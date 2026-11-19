@@ -97,13 +97,31 @@ export async function requireSuccess(label, op) {
 
 // Rows per page for the media snapshots (PostgREST's default max_rows).
 export const SNAPSHOT_PAGE_SIZE = 1000
-// Fail closed instead of looping forever if a server ever ignores the range.
+// Fail closed instead of looping forever if a server ever ignores the
+// keyset filter and keeps returning the same page.
 export const SNAPSHOT_MAX_PAGES = 1000
 
-function assertSnapshotPageLimit(label, from) {
-  if (from >= SNAPSHOT_PAGE_SIZE * SNAPSHOT_MAX_PAGES) {
+function assertSnapshotPageLimit(label, pages) {
+  if (pages >= SNAPSHOT_MAX_PAGES) {
     throw new Error(`${label}: snapshot exceeded the page limit`)
   }
+}
+
+// Keyset pagination on the bigint primary key: each page starts after the
+// last id seen, so a row the user deletes between page requests cannot
+// shift later rows past the scan the way an offset range would.
+function keysetPage(query, lastId) {
+  return (lastId === null ? query : query.gt('id', lastId))
+    .order('id', { ascending: true })
+    .limit(SNAPSHOT_PAGE_SIZE)
+}
+
+function lastRowId(label, rows) {
+  const id = rows[rows.length - 1]?.id
+  if (id === null || id === undefined) {
+    throw new Error(`${label}: snapshot row without an id`)
+  }
+  return id
 }
 
 // ── stages ────────────────────────────────────────────────────────────
@@ -116,17 +134,16 @@ export const STAGES = Object.freeze([
       try {
         // Read BOTH storage_path (paired with thumb_ by contract) and
         // original_storage_path (owner-only original — standalone).
-        // Paged: PostgREST caps an unranged select at its max_rows, which
+        // Paged: PostgREST caps an unpaged select at its max_rows, which
         // would silently leave every image past the cap in R2.
-        for (let from = 0; ;) {
-          assertSnapshotPageLimit('media snapshot', from)
+        let lastId = null
+        for (let pages = 0; ; pages++) {
+          assertSnapshotPageLimit('media snapshot', pages)
           const rows = await requireSuccess(
             'select observation_images.storage_path,original_storage_path',
-            ctx.admin.from('observation_images')
-              .select('storage_path, original_storage_path')
-              .eq('user_id', ctx.uid)
-              .order('id', { ascending: true })
-              .range(from, from + SNAPSHOT_PAGE_SIZE - 1),
+            keysetPage(ctx.admin.from('observation_images')
+              .select('id, storage_path, original_storage_path')
+              .eq('user_id', ctx.uid), lastId),
           ) || []
           for (const row of rows) {
             // storage_path is the public/derivable variant; add its thumb pair.
@@ -141,7 +158,7 @@ export const STAGES = Object.freeze([
           // Stop on an empty page rather than a short one, so a server
           // max_rows below SNAPSHOT_PAGE_SIZE cannot end the scan early.
           if (!rows.length) break
-          from += rows.length
+          lastId = lastRowId('media snapshot', rows)
         }
         return { ok: true }
       } catch (err) {
@@ -156,22 +173,21 @@ export const STAGES = Object.freeze([
         // spore_measurement_mosaics.storage_key is a standalone R2 object
         // with no paired thumb — snapshot each key BEFORE the row is
         // deleted so we can remove the R2 object at delete_r2_media.
-        for (let from = 0; ;) {
-          assertSnapshotPageLimit('media snapshot', from)
+        let lastId = null
+        for (let pages = 0; ; pages++) {
+          assertSnapshotPageLimit('mosaic media snapshot', pages)
           const rows = await requireSuccess(
             'select spore_measurement_mosaics.storage_key',
-            ctx.admin.from('spore_measurement_mosaics')
-              .select('storage_key')
-              .eq('user_id', ctx.uid)
-              .order('id', { ascending: true })
-              .range(from, from + SNAPSHOT_PAGE_SIZE - 1),
+            keysetPage(ctx.admin.from('spore_measurement_mosaics')
+              .select('id, storage_key')
+              .eq('user_id', ctx.uid), lastId),
           ) || []
           for (const row of rows) {
             const key = normalizeStoragePath(row.storage_key)
             if (key) ctx.r2Keys.add(key)
           }
           if (!rows.length) break
-          from += rows.length
+          lastId = lastRowId('mosaic media snapshot', rows)
         }
         return { ok: true }
       } catch (err) {
