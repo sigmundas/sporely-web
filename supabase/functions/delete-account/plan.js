@@ -302,15 +302,22 @@ export const STAGES = Object.freeze([
     name: 'calibration_media_snapshot',
     apply: async ctx => {
       try {
-        const rows = await requireSuccess(
-          'select calibrations.image_storage_path',
-          ctx.admin.from('calibrations')
-            .select('image_storage_path')
-            .eq('user_id', ctx.uid),
-        )
-        for (const row of rows || []) {
-          const key = normalizeStoragePath(row.image_storage_path)
-          if (key) ctx.r2Keys.add(key)
+        // Paged like the image and mosaic snapshots.
+        let lastId = null
+        for (let pages = 0; ; pages++) {
+          assertSnapshotPageLimit('calibration media snapshot', pages)
+          const rows = await requireSuccess(
+            'select calibrations.image_storage_path',
+            keysetPage(ctx.admin.from('calibrations')
+              .select('id, image_storage_path')
+              .eq('user_id', ctx.uid), lastId),
+          ) || []
+          for (const row of rows) {
+            const key = normalizeStoragePath(row.image_storage_path)
+            if (key) ctx.r2Keys.add(key)
+          }
+          if (!rows.length) break
+          lastId = lastRowId('calibration media snapshot', rows)
         }
         return { ok: true }
       } catch (err) {

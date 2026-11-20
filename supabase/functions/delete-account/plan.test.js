@@ -1083,6 +1083,17 @@ test('mosaic_media_snapshot reads every mosaic page', async () => {
   assert.deepEqual(mosaicPages.pages.map(p => p.after), [null, SNAPSHOT_PAGE_SIZE, SNAPSHOT_PAGE_SIZE + 3])
 })
 
+test('calibration_media_snapshot reads every calibration page', async () => {
+  const calibrations = Array.from({ length: SNAPSHOT_PAGE_SIZE + 2 }, (_, i) => ({ image_storage_path: `${UID}/calibration/${i}.jpg` }))
+  const calibrationPages = pagedSelect(calibrations)
+  const admin = fakeAdmin({ tableResponses: { calibrations: { select: calibrationPages.respond } } })
+  const worker = fakeWorker()
+  const result = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
+  assert.equal(result.ok, true)
+  assert.ok(worker.deleted.includes(`${UID}/calibration/${calibrations.length - 1}.jpg`))
+  assert.deepEqual(calibrationPages.pages.map(p => p.after), [null, SNAPSHOT_PAGE_SIZE, SNAPSHOT_PAGE_SIZE + 2])
+})
+
 test('delete_legacy_storage removes every file when a folder holds more than one listing page', async () => {
   // A Storage bucket that lists sorted by name and drops removed files from
   // later listings, like Supabase Storage.
