@@ -51,6 +51,7 @@ This repository owns the W2–W5 cloud and web implementation described there.
     - microscope metadata columns exist but are populated primarily by desktop sync
 - `comments`
   - Community comments on observations
+  - Client updates (since `20261119130000`): `authenticated` may update only `body`, and only on its own comment on an observation it can still access. `observation_id`, `created_at`, `mentioned_user_ids` and `user_id` are fixed after insert
   - Columns: `observation_id` (bigint FK), `user_id` (uuid FK), `body` (text), `created_at`
   - Visibility enforced by RLS: same access rules as the parent observation
 
@@ -92,6 +93,7 @@ This repository owns the W2–W5 cloud and web implementation described there.
   - Populated with ~110k taxa + ~70k vernacular names
 - `search_taxa` (RPC)
   - Deployed and used by the web app for autocomplete/search
+  - Legacy fallback for `search_taxa_v2`. Since `20261119120000` it pins `search_path` and clamps `lim` to 1..50 (NULL means 20), like `search_taxa_v2`
 
 #### Taxonomy v2 experiments and approved sparse direction (not used by clients)
 

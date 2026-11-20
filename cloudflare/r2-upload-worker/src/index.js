@@ -15,6 +15,9 @@ import {
 import { isObsoleteDesktopBrakeActive, obsoleteDesktopRefusal } from './obsolete-desktop-guard.js'
 
 const DEFAULT_MAX_UPLOAD_BYTES = 15 * 1024 * 1024
+// Upper bound for a derived thumbnail (400 px edge, typically 20-80 KB).
+export const THUMB_UPLOAD_BYTE_CAP = 1024 * 1024
+const LEGACY_PUBLIC_CACHE_CONTROL = 'public, max-age=31536000, immutable'
 const DEFAULT_FREE_STORAGE_QUOTA_BYTES = 0
 const DEFAULT_ALLOWED_METHODS = 'GET, HEAD, PUT, DELETE, OPTIONS, POST'
 // Headers that browser/WebView JavaScript must be able to read off a
@@ -413,9 +416,9 @@ async function handleUpload(request, env, ctx, url) {
     throw httpError(400, 'missing_body', 'Request body is required')
   }
 
-  const contentType = String(request.headers.get('Content-Type') || '').trim() || 'application/octet-stream'
-  if (!contentType.startsWith('image/') && contentType !== 'application/octet-stream') {
-    throw httpError(415, 'unsupported_media_type', 'Only image uploads are supported')
+  const contentType = normalizeUploadContentType(request.headers.get('Content-Type'))
+  if (!contentType) {
+    throw httpError(415, 'unsupported_media_type', 'Only raster image uploads are supported')
   }
 
   const bodyBuffer = await request.arrayBuffer()
@@ -595,7 +598,16 @@ async function handleUpload(request, env, ctx, url) {
     storagePath: key,
   })
 
-  if (uploadType !== 'thumb') {
+  if (uploadType === 'thumb') {
+    // Thumbnails are derived at CLOUD_THUMB_MAX_EDGE (400 px) by both the web
+    // and desktop clients and weigh tens of kilobytes. Without a cap here the
+    // thumb type would bypass the plan's full-image byte cap entirely.
+    if (bodyBytes > THUMB_UPLOAD_BYTE_CAP) {
+      const details = buildImageTooLargeDetails('thumb_byte_cap', THUMB_UPLOAD_BYTE_CAP)
+      console.error('[r2-upload-worker] rejecting thumbnail upload by byte cap', details)
+      throw httpError(413, 'image_too_large_for_plan', IMAGE_TOO_LARGE_FOR_PLAN_MESSAGE, details)
+    }
+  } else {
     const planByteCap = Math.max(1, Number(uploadPolicy.fullImageByteCap || 0) || 0)
     if (bodyBytes > planByteCap) {
       const details = buildImageTooLargeDetails('byte_cap', planByteCap)
@@ -626,14 +638,13 @@ async function handleUpload(request, env, ctx, url) {
     }
   }
 
-  // Stage 2: when writing to the private bucket, the Worker owns the
-  // Cache-Control on the R2 object. Client Cache-Control is ignored, so a
-  // rogue or misconfigured client cannot produce a public-immutable
-  // canonical object. When still writing to the legacy public bucket the
-  // client value is honoured for backward compat with in-flight releases.
+  // The Worker owns the Cache-Control on the R2 object; client Cache-Control
+  // is ignored. Private-bucket objects are never cacheable. Legacy public
+  // objects get the value every web and desktop release already sends, so a
+  // client can no longer store an arbitrary header on a public object.
   const cacheControl = canonicalBucket === 'private'
     ? 'private, no-store'
-    : String(request.headers.get('Cache-Control') || 'public, max-age=31536000, immutable').trim()
+    : LEGACY_PUBLIC_CACHE_CONTROL
   const object = await uploadBucket.put(writeKey, bodyBuffer, {
     httpMetadata: {
       contentType,
@@ -801,6 +812,7 @@ async function handleDownload(request, env, ctx, url) {
 
   const headers = corsHeaders(request, env, origin)
   object.writeHttpMetadata(headers)
+  applyStoredMediaSafetyHeaders(headers)
   if (object.httpEtag) headers.set('ETag', object.httpEtag)
   headers.set('Cache-Control', 'private, max-age=300')
 
@@ -1623,6 +1635,36 @@ function publicMediaUrl(env, key) {
 // closed on both sides.
 // Round-3 amendment: `mosaic` moved to its own /mm/ route. This
 // allowlist governs the observation-image /m/ route only.
+/**
+ * Stored media bytes are served from the Worker origin with their stored
+ * Content-Type. Objects uploaded before normalizeUploadContentType existed may
+ * carry an active type (an SVG); `nosniff` plus a sandboxing CSP keeps such a
+ * response inert if it is opened as a document. Image elements ignore both.
+ */
+export function applyStoredMediaSafetyHeaders(headers) {
+  headers.set('X-Content-Type-Options', 'nosniff')
+  headers.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox")
+}
+
+/**
+ * Normalize an upload Content-Type to a bare, lower-case `image/<subtype>`
+ * (or `application/octet-stream`), or return null when it must be refused.
+ *
+ * Legacy-mode objects are served from a public media origin with the stored
+ * Content-Type, so any type a browser renders as a document (SVG, or other
+ * XML-based image types) would be stored script on that origin. Desktop
+ * originals use whatever the OS reports (TIFF, HEIC, PNG, ...), so this is a
+ * deny-list of active types rather than a strict raster allow-list.
+ */
+export function normalizeUploadContentType(raw) {
+  const value = String(raw || '').split(';', 1)[0].trim().toLowerCase()
+  if (!value) return 'application/octet-stream'
+  if (value === 'application/octet-stream') return value
+  if (!/^image\/[a-z0-9][a-z0-9.+-]*$/.test(value)) return null
+  if (/svg|xml/.test(value)) return null
+  return value
+}
+
 export const MEDIA_VARIANTS = new Set(['full', 'thumb', 'original'])
 
 // Historic upload metadata values accepted while writing to the legacy
@@ -1789,6 +1831,7 @@ async function handleMediaDelivery(request, env, ctx, url) {
 
   const headers = corsHeaders(request, env, origin)
   object.writeHttpMetadata(headers)
+  applyStoredMediaSafetyHeaders(headers)
   if (object.httpEtag) headers.set('ETag', object.httpEtag)
 
   // Stage 2a foundation default: `no-store` for ALL /m/ responses,
@@ -2000,6 +2043,7 @@ async function handleMosaicDelivery(request, env, ctx, url) {
 
   const headers = corsHeaders(request, env, origin)
   object.writeHttpMetadata(headers)
+  applyStoredMediaSafetyHeaders(headers)
   if (object.httpEtag) headers.set('ETag', object.httpEtag)
   headers.set('Cache-Control', 'no-store')
   const existingVary = headers.get('Vary')
