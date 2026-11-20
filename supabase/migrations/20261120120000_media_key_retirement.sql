@@ -241,7 +241,7 @@ CREATE TABLE private.media_key_retirements (
 );
 
 COMMENT ON TABLE private.media_key_retirements IS
-  'Media-key retirement records (20261020120000). One immutable row per release or purge claim with its exact delete_keys. Never deleted; only last_swept_at and last_attempted_at change.';
+  'Media-key retirement records (20261120120000). One immutable row per release or purge claim with its exact delete_keys. Never deleted; only last_swept_at and last_attempted_at change.';
 
 -- Sweep order: never-attempted first, then least recently attempted, so
 -- records that keep failing rotate to the back and cannot starve the queue.
@@ -258,7 +258,7 @@ CREATE TABLE private.retired_media_key_roots (
 );
 
 COMMENT ON TABLE private.retired_media_key_roots IS
-  'Retired §K key roots (20261020120000). A retired root is never reusable; rows are never deleted.';
+  'Retired §K key roots (20261120120000). A retired root is never reusable; rows are never deleted.';
 
 -- The guard's read is global (any user, any row), so it needs key_root alone.
 CREATE INDEX retired_media_key_roots_key_root_idx
@@ -353,9 +353,9 @@ ALTER TABLE public.observation_images
   ADD COLUMN purge_retirement_id bigint REFERENCES private.media_key_retirements (id);
 
 COMMENT ON COLUMN public.observation_images.purge_claimed_at IS
-  'Server-owned (20261020120000). Set once by private.claim_tombstoned_image_purge_core together with purge_retirement_id; the row can then never be restored.';
+  'Server-owned (20261120120000). Set once by private.claim_tombstoned_image_purge_core together with purge_retirement_id; the row can then never be restored.';
 COMMENT ON COLUMN public.observation_images.purge_retirement_id IS
-  'Server-owned (20261020120000). The private.media_key_retirements ''purge'' record of this image and owner; immutable once set.';
+  'Server-owned (20261120120000). The private.media_key_retirements ''purge'' record of this image and owner; immutable once set.';
 
 -- =============================================================
 -- 4. Reference lookup (through the expression indexes below).
@@ -1444,7 +1444,7 @@ END
 $$;
 
 COMMENT ON FUNCTION private.sync_brake_guard() IS
-  'Obsolete-desktop sync brake (20261015090000; identity 3 accepted since 20261020120000). Refuses row writes from shipped desktops (python-requests User-Agent, end-user JWT, no x-sporely-sync-identity: 2 or 3) with P0001 / sporely_upgrade_required. Not an authorization boundary. Removed only by the sync-key cutover migration, never as a rollback.';
+  'Obsolete-desktop sync brake (20261015090000; identity 3 accepted since 20261120120000). Refuses row writes from shipped desktops (python-requests User-Agent, end-user JWT, no x-sporely-sync-identity: 2 or 3) with P0001 / sporely_upgrade_required. Not an authorization boundary. Removed only by the sync-key cutover migration, never as a rollback.';
 
 -- =============================================================
 -- 12. admin_database_health: classify the registry tables as operator

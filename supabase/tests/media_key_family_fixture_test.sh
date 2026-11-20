@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# §K cross-language fixture, SQL side (20261020120000_media_key_retirement.sql).
+# §K cross-language fixture, SQL side (20261120120000_media_key_retirement.sql).
 #
 # Reads supabase/tests/fixtures/media_key_family_fixture.json and asserts, for
 # every case, that private.media_key_is_valid matches "valid", that private.media_key_root and private.media_key_family return

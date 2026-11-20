@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Real /rest/v1/rpc calls against the LOCAL stack for 20261020120000 (Stage 0a
+# Real /rest/v1/rpc calls against the LOCAL stack for 20261120120000 (Stage 0a
 # acceptance: release, media_key_is_retired, claim and sweep are allowed or
 # refused exactly as granted, for anon, authenticated and service_role keys),
 # plus a desktop-shaped release (python-requests User-Agent, sync identity 3)

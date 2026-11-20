@@ -465,7 +465,7 @@ Done:
   `purgeSingleTombstoneRow` before any R2 call or row write. Edge-function env is fixed per
   invocation, so the per-row check stops a run only through a fresh deploy/secret change;
   drain evidence (action log, max runtime) is still required before 0a.
-- Stage 0a migration `supabase/migrations/20261020120000_media_key_retirement.sql`.
+- Stage 0a migration `supabase/migrations/20261120120000_media_key_retirement.sql`.
 - Stage 0a item 8 (claim-aware admin-ops purge and `sweep_retired_media_keys`), behind the
   same flag. Deploy it only at rollout step 4.
 - Tests: `supabase/tests/media_key_retirement_test.sql`,

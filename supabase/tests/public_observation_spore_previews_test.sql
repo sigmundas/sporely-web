@@ -200,7 +200,7 @@ BEGIN
 
   -- Malformed mosaics. Since 20261011100000 a client cannot write these:
   -- mosaic ids are GENERATED ALWAYS and the write guards reject keys outside
-  -- '<user_id>/'. Since 20261020120000 the media-key guard refuses them for
+  -- '<user_id>/'. Since 20261120120000 the media-key guard refuses them for
   -- every role too (asserted here), so these legacy rows, which may predate
   -- the guards in production, are planted with that one trigger disabled.
   -- get_public_observation still returns them with the legacy url; the batch

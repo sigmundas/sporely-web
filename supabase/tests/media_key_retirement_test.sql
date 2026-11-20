@@ -1,4 +1,4 @@
--- Regression coverage for 20261020120000_media_key_retirement.sql (Stage 0a of
+-- Regression coverage for 20261120120000_media_key_retirement.sql (Stage 0a of
 -- docs/plans/active/2026-10-20-media-key-retirement-and-cloud-copy-delete.md).
 --
 -- Proves, in one rolled-back transaction:
