@@ -80,6 +80,6 @@
     "@vitejs/plugin-basic-ssl": "^2.3.0",
     "eslint": "^10.4.1",
     "globals": "^17.6.0",
-    "vite": "^6.3.2"
+    "vite": "^6.4.6"
   }
 }
