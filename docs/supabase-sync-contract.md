@@ -166,9 +166,48 @@ Plain English comes first; technical terms are in parentheses.
     taxon id: the raw provider value must be retained, and any namespace hop
     must be a bridge declared in `database/taxonomy/docs/identity-contract.md`.
 
+    **A provider-resolved identity reaches the cloud with its provider tuple.**
+    When the desktop's proven identity was resolved from a non-Sporely
+    provider identifier (`external_id_resolution` with a NorTaxa, Dyntaxa or
+    Artsorakel tuple — including one a release name association resolves to
+    its COL primary) and the cloud's selected ID differs, the desktop writes it
+    through `set_observation_identification_v2` as `sporely_v2` with that
+    tuple and the verbatim `raw_external_id`, `p_write_name = false`: the
+    shape the web already writes for a resolved provider selection. The RPC
+    applies the same guards as `set_observation_selected_taxon_v2`. A picker
+    selection (a `sporely`-namespace tuple) carries no provider identifier and
+    still goes through `set_observation_selected_taxon_v2`; no tuple is
+    derived for it. When the cloud row it replaces holds a provider tuple, the
+    picker selection is written through `set_observation_identification_v2`
+    with its own `sporely`-namespace tuple instead, so the old provider id is
+    not left paired with the new species. A client that still changes the
+    selection through `set_observation_selected_taxon_v2` alone (older
+    desktops, the web's fallback) can leave such a stale tuple; a receiving
+    desktop then keeps it only as unverified, never as proof. A cloud row whose
+    selected ID already matches is not written, with one metadata-only
+    exception: when the desktop's identity is `external_id_resolution` with a
+    non-Sporely tuple and the cloud row was read with its tuple columns and
+    holds nothing there (all empty), the desktop adds its tuple through
+    `set_observation_identification_v2` with the same selected ID and
+    `p_write_name = false`. It never replaces an existing value, even a
+    partial one, and that includes a `sporely`-namespace tuple a picker
+    wrote: that is identification provenance too (owner decision
+    2026-11-02); keeping both awaits separate historical identification
+    evidence. A picker, unverified or
+    legacy identity never adds one; and once the tuple is there a resync
+    writes nothing. It runs only when the observation is pushed, so unchanged
+    observations are not swept. A `22023` refusal of that metadata write
+    leaves the row as it is (no unresolved fallback: the cloud's selection is
+    not cleared). Re-picking the same species over an unverified cloud
+    selection writes nothing, so the cloud keeps any provider tuple it held;
+    locally the picker selection replaces the kept unverified tuple, because
+    the single tuple slot beside a proven proof would read as verified. The
+    desktop's own provenance text and proof are not sent (the cloud has no
+    columns for them); a receiving desktop records its own verification.
+
     **A proven concept the cloud release lacks is preserved, not failed.** A
     client's installed release can hold concepts the scoped cloud release does
-    not (every NorTaxa-only concept). When `set_observation_selected_taxon_v2`
+    not (every NorTaxa-only concept). When the guarded RPC (either writer above)
     refuses a proven identity with `22023` "missing from the active
     taxonomy-v2 release", the client must not fail the observation's push.
     If the identity carries a non-Sporely source tuple, the client preserves
@@ -179,6 +218,35 @@ Plain English comes first; technical terms are in parentheses.
     fails the push. A later push of the row retries the guarded RPC, so the
     concept binds once the cloud release contains it; the refusal itself
     writes nothing.
+
+    **A cloud identity received on pull is kept, never proven by itself.** The
+    server guarantees only that `selected_sporely_taxon_id` was in the active
+    release when it was written; it records no producer and no release, and
+    pre-Stage-2 desktops asserted unproven integers through the same RPC. A
+    desktop therefore stores a pulled Sporely ID as `sporely_v2` with proof
+    `cloud_selected_unverified` — only when its installed taxonomy artifact
+    contains the concept, with the artifact's canonical name/rank as the
+    snapshot and provenance naming the cloud and the local release. That
+    proof is outside the proven set: the value is displayed, restored and
+    preserved across saves, but never re-asserted through the RPC and never
+    used by identity-gated lookups (Red List, reference attachment). An
+    explicit picker selection replaces it with `taxonomy_v2_artifact`.
+    **Exception — the desktop re-derives it.** When the cloud row also records
+    the non-Sporely provider tuple that produced the selection (a web/Android
+    client resolved `NBIC:57217` and wrote `nortaxa/nortaxa_taxon_id/57217`
+    beside the selected ID), and the installed artifact's authoritative
+    resolver maps that tuple to the same concept, the desktop stores it as
+    `external_id_resolution` with that tuple — the identity a desktop copy of
+    the identifier produces. When the installed release presents the selected
+    concept as another one through a name association (`taxon_association_min`
+    member → primary), a tuple resolving to that primary also proves it; the
+    cloud's own selected ID is kept, never replaced by the primary. A tuple
+    that resolves to nothing or to an unrelated concept, or a
+    `sporely`-namespace tuple, leaves `cloud_selected_unverified`; a
+    non-Sporely tuple that did not verify is still kept beside it, with
+    `cloud_provider_tuple_unverified` appended to the provenance, so a later
+    release or an association reversal can trace the source concept. It proves
+    nothing and is never pushed.
 
     **The persistence API accepts one complete typed identity transition.**
     The identity spans several columns but is a single value, and treating
@@ -534,26 +602,18 @@ missing extension equals an explicitly null one, real statistics are a genuine
 difference, and an unsupported version is never projectable, so it is never
 equal to anything. Nothing rewrites or enriches a historical snapshot;
 replacement evidence goes through explicit refresh or successor adoption.
-Enhanced content becoming frozen evidence is held behind the
-minimum-supported-reader-version gate
-(`references/measurement_content_gates.py` in `sporely-py`), which ships
-closed: while it is closed the desktop refuses to attach, refresh onto, or
-adopt an enhanced measurement set instead of freezing a lossy version-1
-snapshot of it.
+Full L/W/Q editing, v2 attachment and bundle export are enabled together for
+the single-user desktop. Migration `20261026180718_activate_reference_reported_statistics`
+activates the existing validators/builders at the current schema head and retires
+`private.reference_creation_blocked_by_older_client`. The pinned September
+migration remains excluded from deployment; its history is not repaired or
+retimed. Stale device records cannot block a capable request. Version-aware
+owner/public reads, format validation, ownership, CAS and RLS remain enforced.
 
-That gate covers observation attachment only, and is not a structural bar on
-version-2 generation. `private.share_reference_contribution_for_owner` is a
-second caller of `private.reference_canonical_snapshot`: its entry point
-`public.share_reference_contribution` is granted to `authenticated`, and the
-resulting snapshot is stored in
-`shared_reference_contribution_revisions.envelope_json` and returned verbatim
-by `public.search_public_reference_contributions` and
-`public.get_public_reference_contribution`, both granted to `anon`. That
-envelope is bounded only by jsonb type and size and carries no
-`schema_version` CHECK. Sharing an enhanced measurement set therefore
-publishes a version-2 snapshot on a route the desktop gate does not see, so
-the shared-contribution path needs its own version decision before snapshot
-version 2 is enabled in production.
+Shared-reference contributions use the same canonical v2 snapshot builder.
+The deployed public-read wrappers negotiate accepted versions and preserve
+full v2 content for capable readers; unknown snapshot/details versions are
+rejected. Sharing requires no separate client-population rollout decision.
 
 Observation-use pull imports the frozen `snapshot_json` exactly as stored.
 Three-way reconciliation may automatically combine only disjoint role/note
@@ -643,6 +703,36 @@ A linked metadata-only anchor (valid `cloud_id`, remote `storage_path` NULL) who
 | Spore measurements and calibration identity/data | Shared |
 | Social graph, social comments, reports, blocks, billing, moderation | Cloud/web only |
 | Thumbnails, plots, mosaics, and crops | Rebuildable unless deliberately persisted |
+
+### Desktop account binding
+
+A desktop profile stores the account its database syncs with as
+`linked_cloud_user_id` in the profile's app settings, not in the database. A
+linked database refuses every other account (`AccountMismatchError`). An
+unlinked database binds on its first sign-in or sync only when it holds no
+observations with a `cloud_id`, or when the signed-in account owns at least
+one of up to 50 of those observations, most recently synced first. Otherwise
+the desktop refuses the account and saves no link; a refused sign-in also saves
+no credentials. A copied or
+restored database therefore cannot adopt whichever account a browser sign-in
+happens to use. If the ownership lookup fails, the desktop does not link. To
+move a database to a new account, use Reset Cloud Sync, which clears the link
+and every local `cloud_id`.
+
+Because the link belongs to the profile, switching the profile to another
+database folder clears it (`forget_linked_cloud_user_id`), and the next sync
+applies the first-link check to the newly opened database. Moving the same
+database file to a new folder keeps the link.
+
+A token refresh never overwrites a session written while its request was in
+flight. Every session write (sign-in, a saved refresh, sign-out) starts a new
+session generation, and a refresh saves its rotated tokens only if the
+generation has not changed since it read the stored session. After a sign-out
+or a sign-in to another account the refreshing client stops; a newer session of
+the same account is adopted instead of overwritten. A client loaded from the
+stored session before a sign-out never refreshes afterwards: with no stored
+session, the profile is signed out. A fresh sign-in whose credentials are not
+saved yet may still refresh.
 
 ## Keep image decisions explicit
 

@@ -1,4 +1,5 @@
--- Regression coverage for 20261020100000_add_admin_sync_health
+-- Regression coverage for 20261020100000_add_admin_sync_health, as replaced by
+-- 20261020120000_admin_sync_health_detail (detail RPC: admin_sync_health_detail_test.sql).
 -- (public.admin_sync_health, admin "Sync health" snapshot). Proves:
 --   * shape: SECURITY DEFINER, search_path '', STABLE, owner postgres;
 --   * effective EXECUTE: not anon, PUBLIC or service_role; authenticated yes;
@@ -156,7 +157,7 @@ SELECT is((SELECT j -> 'write_block' FROM empty_res), '{"count": 0, "rows": []}'
 SELECT is((SELECT j #> '{sync_key,duplicate_groups}' FROM empty_res),
   '{"total": 0, "truncated": false, "rows": [], "by_table_rule": []}'::jsonb, 'no data: no duplicate groups');
 SELECT is((SELECT j -> 'media_metadata' FROM empty_res),
-  '{"live_with_bytes_no_path": 0, "recorded_primary_bytes": 0}'::jsonb, 'no data: media metadata zero');
+  '{"live_with_bytes_no_path": 0, "microscope_anchors_with_bytes": 0, "recorded_primary_bytes": 0}'::jsonb, 'no data: media metadata zero');
 SELECT is(
   (SELECT array_agg(k ORDER BY k) FROM empty_res, jsonb_object_keys(j) k),
   ARRAY['activity_by_version_d7', 'desktop_versions', 'generated_at', 'media_metadata', 'min_desktop_version',
@@ -338,18 +339,18 @@ SELECT is((SELECT j -> 'activity_by_version_d7' FROM res),
 -- ---------------------------------------------------------------
 
 SELECT is((SELECT j #> '{sync_key,tables,0}' FROM res),
-  '{"table": "observations", "live_rows": 4, "null_sync_key": 2, "null_sync_key_after_cutoff": 1, "keyed_with_desktop_id": 1}'::jsonb,
+  '{"table": "observations", "live_rows": 4, "null_sync_key": 2, "null_sync_key_after_cutoff": 1, "null_sync_key_after_cutoff_desktop": 0, "null_sync_key_after_cutoff_other": 1, "keyed_with_desktop_id": 1}'::jsonb,
   'observations coverage');
 SELECT is((SELECT j #> '{sync_key,tables,1}' FROM res),
-  '{"table": "observation_images", "live_rows": 122, "null_sync_key": 65, "null_sync_key_after_cutoff": 1, "keyed_with_desktop_id": 1}'::jsonb,
+  '{"table": "observation_images", "live_rows": 122, "null_sync_key": 65, "null_sync_key_after_cutoff": 1, "null_sync_key_after_cutoff_desktop": 0, "null_sync_key_after_cutoff_other": 1, "keyed_with_desktop_id": 1}'::jsonb,
   'observation_images coverage: deleted and purged rows excluded; cutoff edge counted, 1us before not');
 SELECT is((SELECT j #> '{sync_key,tables,2}' FROM res),
-  '{"table": "spore_measurements", "live_rows": 3, "null_sync_key": 1, "null_sync_key_after_cutoff": null, "keyed_with_desktop_id": 1}'::jsonb,
+  '{"table": "spore_measurements", "live_rows": 3, "null_sync_key": 1, "null_sync_key_after_cutoff": null, "null_sync_key_after_cutoff_desktop": null, "null_sync_key_after_cutoff_other": null, "keyed_with_desktop_id": 1}'::jsonb,
   'spore_measurements coverage: measurements on a deleted image excluded; after-cutoff is null (not measurable)');
 SELECT is((SELECT j #> '{sync_key,duplicate_groups,by_table_rule}' FROM res),
-  '[{"table": "observation_images", "rule": "keyed_keyless_twin", "count": 52},
-    {"table": "observation_images", "rule": "shared_key", "count": 1},
-    {"table": "spore_measurements", "rule": "keyed_keyless_twin", "count": 1}]'::jsonb,
+  '[{"table": "observation_images", "rule": "keyed_keyless_twin", "count": 52, "detail_key": "duplicate_groups.observation_images.keyed_keyless_twin"},
+    {"table": "observation_images", "rule": "shared_key", "count": 1, "detail_key": "duplicate_groups.observation_images.shared_key"},
+    {"table": "spore_measurements", "rule": "keyed_keyless_twin", "count": 1, "detail_key": "duplicate_groups.spore_measurements.keyed_keyless_twin"}]'::jsonb,
   'by_table_rule counts the measurement twin although the truncated list omits it; deleted-image twin not counted');
 
 -- Duplicate groups: 1 shared_key + 52 image twins + 1 measurement twin = 54.
@@ -393,8 +394,8 @@ SELECT is(
 -- ---------------------------------------------------------------
 
 SELECT is((SELECT j -> 'media_metadata' FROM res),
-  '{"live_with_bytes_no_path": 1, "recorded_primary_bytes": 150}'::jsonb,
-  'media metadata: one live image with bytes and no path; pathless anchor without bytes not counted');
+  '{"live_with_bytes_no_path": 0, "microscope_anchors_with_bytes": 1, "recorded_primary_bytes": 150}'::jsonb,
+  'media metadata: the pathless microscope image with bytes is an anchor (info), not a warning; anchor without bytes not counted');
 SELECT is((SELECT j #> '{taxonomy,by_state}' FROM res),
   '[{"state": "external_unresolved", "count": 1}, {"state": "legacy_null", "count": 3}]'::jsonb,
   'taxonomy by_state maps NULL to legacy_null');
@@ -428,16 +429,16 @@ SELECT is((SELECT severity FROM w WHERE key = 'sync_key_shared_key'), 'warning',
 SELECT is((SELECT severity FROM w WHERE key = 'keyed_with_desktop_id.observations'), 'watch', 'keyed observation with desktop_id -> watch');
 SELECT is((SELECT severity FROM w WHERE key = 'keyed_with_desktop_id.observation_images'), 'watch', 'keyed image with desktop_id -> watch');
 SELECT is((SELECT severity FROM w WHERE key = 'keyed_with_desktop_id.spore_measurements'), 'watch', 'keyed measurement with desktop_id -> watch');
-SELECT is((SELECT severity FROM w WHERE key = 'null_sync_key_after_cutoff.observations'), 'watch', 'keyless observation after cutoff -> watch');
-SELECT is((SELECT severity FROM w WHERE key = 'null_sync_key_after_cutoff.observation_images'), 'watch', 'keyless image at cutoff -> watch');
-SELECT ok(NOT EXISTS (SELECT 1 FROM w WHERE key = 'null_sync_key_after_cutoff.spore_measurements'),
+SELECT is((SELECT severity FROM w WHERE key = 'null_sync_key_after_cutoff.observations.other'), 'info', 'keyless observation after cutoff without desktop_id -> info');
+SELECT is((SELECT severity FROM w WHERE key = 'null_sync_key_after_cutoff.observation_images.other'), 'info', 'keyless image at cutoff without desktop_id -> info');
+SELECT ok(NOT EXISTS (SELECT 1 FROM w WHERE key LIKE 'null_sync_key_after_cutoff.spore_measurements%'),
   'no after-cutoff warning for measurements (all measured before the cutoff)');
 SELECT is((SELECT severity FROM w WHERE key = 'sync_key_keyed_keyless_twin'), 'watch', 'twin group -> watch');
 SELECT is((SELECT severity FROM w WHERE key = 'taxonomy_external_unresolved'), 'watch', 'external_unresolved -> watch');
-SELECT is((SELECT severity FROM w WHERE key = 'media_bytes_no_path'), 'watch', 'bytes without path -> watch');
+SELECT ok(NOT EXISTS (SELECT 1 FROM w WHERE key = 'media_bytes_no_path'), 'a microscope anchor with bytes raises no media warning');
 SELECT is((SELECT severity FROM w WHERE key = 'legacy_keyless_rows'), 'info', 'keyless legacy rows -> info');
 SELECT is((SELECT severity FROM w WHERE key = 'desktop_unparseable_d30'), 'info', 'unparseable desktop version -> info');
-SELECT is((SELECT count(*)::int FROM w), 13, 'exactly 13 warnings');
+SELECT is((SELECT count(*)::int FROM w), 12, 'exactly 12 warnings');
 SELECT ok((SELECT bool_and(message IS NOT NULL AND message <> '') FROM w), 'every warning has a message');
 SELECT ok((SELECT bool_and(severity IN ('info', 'watch', 'warning')) FROM w), 'severities are info, watch or warning');
 
@@ -456,9 +457,9 @@ SELECT ok(NOT EXISTS (SELECT 1 FROM w2 WHERE key = 'write_block_active'), 'no wr
 SELECT ok(NOT EXISTS (SELECT 1 FROM w2 WHERE key = 'desktop_below_min_d7'),
   'below-min devices only outside d7 (0.9.24 at 7d+1s) -> no warning');
 SELECT is((SELECT (j #>> '{desktop_versions,below_min,d30,devices}')::int FROM res2), 1, 'the d30-only below-min device still counts in d30');
-SELECT ok(NOT EXISTS (SELECT 1 FROM w2 WHERE key = 'null_sync_key_after_cutoff.observation_images'),
+SELECT ok(NOT EXISTS (SELECT 1 FROM w2 WHERE key LIKE 'null_sync_key_after_cutoff.observation_images%'),
   'keyless images only before the cutoff -> no watch');
-SELECT is((SELECT count(*)::int FROM w2), 10, '10 warnings remain');
+SELECT is((SELECT count(*)::int FROM w2), 9, '9 warnings remain');
 
 -- ---------------------------------------------------------------
 -- Read-only: the call succeeds in a READ ONLY transaction.

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,6 +31,11 @@ const MANIFEST_PATH = path.resolve(
   'reconciliation-manifest.json',
 );
 const SHA_PATH = MANIFEST_PATH.replace(/\.json$/, '.sha256.txt');
+// The desktop-published manifest lives in the sibling sporely-py checkout;
+// a standalone checkout (CI) skips the tests that read it.
+const desktopManifest = existsSync(MANIFEST_PATH)
+  ? {}
+  : { skip: 'needs the sibling sporely-py checkout (reconciliation-manifest.json)' };
 const SCHEMA = 'w2d_migration_simulation';
 
 // ---------- non-integration -----------------------------------------------
@@ -65,21 +71,21 @@ test('removeExcludedKeys strips documented non-semantic fields recursively', () 
   });
 });
 
-test('semantic SHA-256 helper matches the desktop-published hash', async () => {
+test('semantic SHA-256 helper matches the desktop-published hash', desktopManifest, async () => {
   const manifest = JSON.parse(await readFile(MANIFEST_PATH, 'utf8'));
   const expected = (await readFile(SHA_PATH, 'utf8')).trim();
   const computed = computeSemanticSha256(manifest);
   assert.equal(computed, expected);
 });
 
-test('loadManifest verifies the sibling .sha256.txt file', async () => {
+test('loadManifest verifies the sibling .sha256.txt file', desktopManifest, async () => {
   const { manifest, semanticSha } = await loadManifest(MANIFEST_PATH);
   const expected = (await readFile(SHA_PATH, 'utf8')).trim();
   assert.equal(semanticSha, expected);
   assert.equal(manifest.record_count, manifest.records.length);
 });
 
-test('every manifest record carries the contract §6 field set', async () => {
+test('every manifest record carries the contract §6 field set', desktopManifest, async () => {
   const manifest = JSON.parse(await readFile(MANIFEST_PATH, 'utf8'));
   assert.ok(manifest.records.length > 0, 'manifest is expected to have records');
   for (const record of manifest.records) {

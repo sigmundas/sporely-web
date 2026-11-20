@@ -163,3 +163,55 @@ test('legacy data check that throws is treated as no legacy data (fail safe → 
   assert.equal(outcome, 'assigned')
   assert.equal(purgeCalls, 0)
 })
+
+test('a superseded resolution neither purges nor claims the marker', async () => {
+  const { resolveLocalDataOwner, getLocalDataOwner, setLocalDataOwner } = await import('./local-data-owner.js')
+  const store = new Map()
+  const storage = {
+    getItem: key => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => { store.set(key, String(value)) },
+    removeItem: key => { store.delete(key) },
+  }
+  // No marker yet: B's resolution is checking IndexedDB for unowned data
+  // when C signs in and claims the device.
+  let current = true
+  let purges = 0
+  let releaseCheck
+  const checkGate = new Promise(resolve => { releaseCheck = resolve })
+  const pending = resolveLocalDataOwner('user-b', async () => { purges += 1 }, {
+    storage,
+    hasLegacyData: async () => { await checkGate; return true },
+    isCurrent: () => current,
+  })
+  current = false
+  setLocalDataOwner('user-c', storage)
+  releaseCheck()
+  const result = await pending
+  assert.equal(result.outcome, 'stale')
+  assert.equal(purges, 0, 'the stale resolution must not purge C\'s data')
+  assert.equal(getLocalDataOwner(storage), 'user-c', 'the marker stays with the newer account')
+
+  // Superseded after a successful purge: the marker is still not claimed.
+  setLocalDataOwner('user-a', storage)
+  current = true
+  const result2 = await resolveLocalDataOwner('user-b', async () => { current = false }, { storage, isCurrent: () => current })
+  assert.equal(result2.outcome, 'stale')
+  assert.equal(getLocalDataOwner(storage), 'user-a')
+})
+
+test('a superseded resolution whose purge fails reports stale, not purge_failed', async () => {
+  const { resolveLocalDataOwner, setLocalDataOwner } = await import('./local-data-owner.js')
+  const store = new Map()
+  const storage = {
+    getItem: key => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => { store.set(key, String(value)) },
+    removeItem: key => { store.delete(key) },
+  }
+  setLocalDataOwner('user-a', storage)
+  let current = true
+  const result = await resolveLocalDataOwner('user-b', async () => {
+    current = false // a newer sign-in replaced B while the purge ran
+    throw new Error('IDB write failed')
+  }, { storage, isCurrent: () => current })
+  assert.equal(result.outcome, 'stale', 'the caller must not treat a superseded sign-in as its own failure')
+})

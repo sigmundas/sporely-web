@@ -28,6 +28,11 @@ import {
   removeInatItem,
   INAT_USER_ID_KEY,
   INAT_USERNAME_KEY,
+  INAT_REFRESH_TOKEN_KEY,
+  blockInaturalistSessionForThisPageLoad,
+  forgetInaturalistSession,
+  hasStoredInaturalistSession,
+  inaturalistLinkEpoch,
 } from './inaturalist.js'
 
 function bytesToBase64(bytes) {
@@ -842,5 +847,189 @@ test('regression: connecting iNaturalist never touches the Supabase auth session
     for (const [method, fn] of Object.entries(original)) {
       supabase.auth[method] = fn
     }
+  }
+})
+
+
+function _expiredWebSession() {
+  return {
+    username: 'account_a',
+    user_id: 7,
+    access_token: 'access-a',
+    refresh_token: 'refresh-a',
+    expires_at: Date.now() - 60_000,
+    api_token: 'api-a',
+    api_token_created_at: Date.now(),
+    api_token_expires_at: Date.now() + 60_000,
+    platform: 'web',
+  }
+}
+
+test('forgetting the session during an in-flight refresh drops the write-back', async () => {
+  const runtime = createRuntimeStorageMocks({ platform: 'web', native: false })
+  try {
+    await persistInaturalistSession(_expiredWebSession())
+
+    let releaseRefresh
+    const refreshGate = new Promise(resolve => { releaseRefresh = resolve })
+    const loading = loadInaturalistSession(undefined, {
+      fetchImpl: async url => {
+        assert.ok(String(url).endsWith('/oauth/token'), `unexpected request ${url}`)
+        await refreshGate
+        return jsonResponse({ access_token: 'access-a-refreshed', refresh_token: 'refresh-a2', expires_in: 3600 })
+      },
+    })
+    // Account A signs out while the refresh is in flight.
+    await new Promise(resolve => setTimeout(resolve, 0))
+    await forgetInaturalistSession()
+    releaseRefresh()
+    const session = await loading
+
+    assert.equal(session.connected, false, 'the forgotten session must not be handed out')
+    assert.equal(runtime.localStorageData.get(INAT_ACCESS_TOKEN_KEY) ?? '', '', 'no access token written back')
+    assert.equal(runtime.localStorageData.get(INAT_REFRESH_TOKEN_KEY) ?? '', '', 'no refresh token written back')
+    assert.equal(await hasStoredInaturalistSession(), false)
+  } finally {
+    runtime.restore()
+  }
+})
+
+test('a blocked session stays unreadable until a new session is persisted', async () => {
+  const runtime = createRuntimeStorageMocks({ platform: 'web', native: false })
+  try {
+    await persistInaturalistSession({ ..._expiredWebSession(), expires_at: Date.now() + 60_000 })
+    assert.equal(await hasStoredInaturalistSession(), true)
+
+    blockInaturalistSessionForThisPageLoad()
+    const blocked = await loadInaturalistSession(undefined, {
+      fetchImpl: async () => { throw new Error('a blocked session must not refresh') },
+    })
+    assert.equal(blocked.connected, false)
+    assert.equal(blocked.access_token ?? null, null)
+
+    // Linking a new account overwrites every key, which lifts the block.
+    await persistInaturalistSession({
+      username: 'account_b', user_id: 8, access_token: 'access-b', refresh_token: 'refresh-b',
+      expires_at: Date.now() + 60_000, api_token: 'api-b',
+      api_token_created_at: Date.now(), api_token_expires_at: Date.now() + 60_000, platform: 'web',
+    })
+    const linked = await loadInaturalistSession(undefined, {
+      fetchImpl: async () => { throw new Error('unexpected refresh') },
+    })
+    assert.equal(linked.connected, true)
+    assert.equal(linked.username, 'account_b')
+  } finally {
+    await forgetInaturalistSession()
+    runtime.restore()
+  }
+})
+
+test('a block cancels an in-flight refresh and a refresh can never lift it', async () => {
+  const runtime = createRuntimeStorageMocks({ platform: 'web', native: false })
+  try {
+    await persistInaturalistSession(_expiredWebSession())
+    let releaseRefresh
+    const refreshGate = new Promise(resolve => { releaseRefresh = resolve })
+    const loading = loadInaturalistSession(undefined, {
+      fetchImpl: async () => {
+        await refreshGate
+        return jsonResponse({ access_token: 'access-a-refreshed', expires_in: 3600 })
+      },
+    })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    // Removal failed for an account change, so the caller blocks instead.
+    blockInaturalistSessionForThisPageLoad()
+    releaseRefresh()
+    const session = await loading
+
+    assert.equal(session.connected, false)
+    assert.equal(runtime.localStorageData.get(INAT_ACCESS_TOKEN_KEY), 'access-a', 'the refreshed token was not written')
+    const later = await loadInaturalistSession(undefined, {
+      fetchImpl: async () => { throw new Error('a blocked session must not refresh') },
+    })
+    assert.equal(later.connected, false, 'still blocked: only an explicit new link lifts it')
+  } finally {
+    await forgetInaturalistSession()
+    runtime.restore()
+  }
+})
+
+test('a block decided before a new link does not hide that link', async () => {
+  const runtime = createRuntimeStorageMocks({ platform: 'web', native: false })
+  try {
+    const epochAtPurgeStart = inaturalistLinkEpoch()
+    await persistInaturalistSession({ ..._expiredWebSession(), username: 'account_b', expires_at: Date.now() + 60_000 })
+    // The older purge fails only now.
+    blockInaturalistSessionForThisPageLoad({ unlessLinkedSince: epochAtPurgeStart })
+    const session = await loadInaturalistSession(undefined, {
+      fetchImpl: async () => { throw new Error('unexpected refresh') },
+    })
+    assert.equal(session.connected, true)
+    assert.equal(session.username, 'account_b')
+  } finally {
+    await forgetInaturalistSession()
+    runtime.restore()
+  }
+})
+
+test('native login cancelled by an account change while the OAuth prompt is open', async () => {
+  resetInaturalistOAuthStateForTests()
+  const runtime = createRuntimeStorageMocks({ platform: 'web', native: false })
+  let releaseLogin
+  const loginGate = new Promise(resolve => { releaseLogin = resolve })
+  const socialLogin = {
+    async initialize() {},
+    async login() {
+      await loginGate
+      return {
+        provider: 'oauth2',
+        result: { providerId: 'inaturalist', accessToken: { token: 'access-a' }, refreshToken: 'refresh-a', expiresIn: 3600 },
+      }
+    },
+  }
+  try {
+    const connecting = connectInaturalist({
+      platform: 'android',
+      socialLoginImpl: socialLogin,
+      fetchImpl: async url => {
+        if (String(url).endsWith('/users/api_token')) return jsonResponse({ api_token: 'api-a' })
+        return jsonResponse({ results: [{ id: 7, login: 'account_a' }] })
+      },
+    })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    // Account A signs out while the prompt is open.
+    await forgetInaturalistSession()
+    releaseLogin()
+    await assert.rejects(connecting, /cancelled because the Sporely account changed/)
+    assert.equal(await hasStoredInaturalistSession(), false, 'nothing from the old login was stored')
+  } finally {
+    await forgetInaturalistSession()
+    runtime.restore()
+  }
+})
+
+test('a link write still in flight when the session is forgotten is undone', async () => {
+  const data = new Map()
+  let releaseWrites
+  const writeGate = new Promise(resolve => { releaseWrites = resolve })
+  // Capacitor Preferences-shaped: asynchronous writes the module awaits.
+  const slowStorage = {
+    async get({ key }) { return { value: data.has(key) ? data.get(key) : null } },
+    async set({ key, value }) { await writeGate; data.set(key, String(value)) },
+    async remove({ key }) { data.delete(key) },
+  }
+  const runtime = createRuntimeStorageMocks({ platform: 'web', native: false })
+  try {
+    const writing = persistInaturalistSession({ ..._expiredWebSession(), expires_at: Date.now() + 60_000 }, slowStorage)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    // Account A signs out while the writes are still pending.
+    await forgetInaturalistSession()
+    releaseWrites()
+    assert.equal(await writing, false)
+    assert.equal(data.get(INAT_ACCESS_TOKEN_KEY) ?? '', '', 'the late write was rolled back')
+    assert.equal(data.get(INAT_REFRESH_TOKEN_KEY) ?? '', '')
+  } finally {
+    await forgetInaturalistSession()
+    runtime.restore()
   }
 })

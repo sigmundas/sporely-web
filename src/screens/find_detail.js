@@ -5036,7 +5036,7 @@ async function _searchMentions(query, dropdown, input, mentionStart) {
   if (!data?.length) { dropdown.style.display = 'none'; return }
 
   dropdown.innerHTML = data.map((u, i) =>
-    `<li data-idx="${i}" data-username="${u.username}">@${u.username}${u.display_name ? ` · ${u.display_name}` : ''}</li>`
+    `<li data-idx="${i}" data-username="${_esc(u.username)}">@${_esc(u.username)}${u.display_name ? ` · ${_esc(u.display_name)}` : ''}</li>`
   ).join('')
   dropdown.style.display = 'block'
   dropdown._users = data

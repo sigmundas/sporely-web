@@ -12,6 +12,8 @@ import worker, {
   findMediaObject,
   deriveThumbKey as deriveThumbKey_STAGE2,
   deleteMediaObjectCopies,
+  normalizeUploadContentType,
+  THUMB_UPLOAD_BYTE_CAP,
 } from './index.js'
 
 const TEST_ENV = {
@@ -822,6 +824,8 @@ test('Stage2a: /m/ anon on public row matching version returns bytes', async () 
     assert.equal(res.headers.get('Cache-Control'), 'no-store',
       'Stage 2a defaults to no-store for ALL /m/ responses')
     assert.match(res.headers.get('Vary') || '', /Authorization/)
+    assert.equal(res.headers.get('X-Content-Type-Options'), 'nosniff')
+    assert.match(res.headers.get('Content-Security-Policy') || '', /sandbox/)
     assert.equal(await res.text(), 'OK')
   } finally { restore() }
 })
@@ -2687,4 +2691,130 @@ test('HEAD /upload/<key>: works for private bucket in private mode', async () =>
   const res = await worker.fetch(buildHeadRequest('user-123/obs/0.webp', token), env, {})
   assert.equal(res.status, 200)
   assert.ok(privateBucket.events.some(e => e.op === 'head'))
+})
+
+function legacyUploadEnv(jwtSecret, mediaBucket) {
+  return {
+    ...TEST_ENV,
+    MEDIA_STORAGE_MODE: 'legacy',
+    MEDIA_BUCKET: mediaBucket,
+    MEDIA_PUBLIC_BASE_URL: 'https://media.sporely.no',
+    SUPABASE_URL: 'https://example.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+    SUPABASE_JWT_SECRET: jwtSecret,
+  }
+}
+
+const PRO_PROFILE = {
+  is_pro: true, cloud_plan: 'pro', storage_quota_bytes: null,
+  total_storage_bytes: 0, storage_used_bytes: 0, image_count: 0, is_banned: false,
+}
+
+test('normalizeUploadContentType refuses SVG, XML and malformed types', () => {
+  assert.equal(normalizeUploadContentType('image/webp'), 'image/webp')
+  assert.equal(normalizeUploadContentType('IMAGE/JPEG; charset=binary'), 'image/jpeg')
+  assert.equal(normalizeUploadContentType('image/tiff'), 'image/tiff')
+  assert.equal(normalizeUploadContentType('image/heic'), 'image/heic')
+  assert.equal(normalizeUploadContentType(''), 'application/octet-stream')
+  assert.equal(normalizeUploadContentType(null), 'application/octet-stream')
+  assert.equal(normalizeUploadContentType('application/octet-stream'), 'application/octet-stream')
+  for (const refused of [
+    'image/svg+xml', 'image/SVG+XML; charset=utf-8', 'image/svg', 'image/x-svg',
+    'image/vnd.xml', 'text/html', 'image/png, text/html', 'image/', 'image',
+    'application/xml', 'image/png text/html',
+  ]) {
+    assert.equal(normalizeUploadContentType(refused), null, refused)
+  }
+})
+
+test('uploads with an SVG content type are refused before any write', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock(PRO_PROFILE)
+  let puts = 0
+  try {
+    for (const contentType of ['image/svg+xml', 'image/svg+xml; charset=utf-8', 'text/html']) {
+      const response = await worker.fetch(
+        buildUploadRequest({
+          token, bodyBytes: 200, uploadMode: 'full', uploadVariant: 'full',
+          cloudPlan: 'pro', qualityProfile: 'high', sourceWidth: 100,
+          sourceHeight: 100, storedWidth: 100, storedHeight: 100, contentType,
+        }),
+        legacyUploadEnv(jwtSecret, { head: async () => null, put: async () => { puts += 1; return {} } }),
+        {},
+      )
+      const payload = await response.json()
+      assert.equal(response.status, 415, contentType)
+      assert.equal(payload.error, 'unsupported_media_type')
+    }
+    assert.equal(puts, 0)
+  } finally { restoreFetch() }
+})
+
+test('thumbnail uploads above the thumbnail byte cap are refused', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock(PRO_PROFILE)
+  let puts = 0
+  try {
+    const response = await worker.fetch(
+      buildUploadRequest({
+        token, bodyBytes: THUMB_UPLOAD_BYTE_CAP + 1, uploadMode: 'reduced', uploadVariant: 'thumb',
+        cloudPlan: 'pro', qualityProfile: 'high', sourceWidth: 4000,
+        sourceHeight: 3000, storedWidth: 400, storedHeight: 300,
+      }),
+      legacyUploadEnv(jwtSecret, { head: async () => null, put: async () => { puts += 1; return {} } }),
+      {},
+    )
+    const payload = await response.json()
+    assert.equal(response.status, 413)
+    assert.equal(payload.error, 'image_too_large_for_plan')
+    assert.equal(payload.details.reason, 'thumb_byte_cap')
+    assert.equal(payload.details.planByteCap, THUMB_UPLOAD_BYTE_CAP)
+    assert.equal(puts, 0)
+  } finally { restoreFetch() }
+})
+
+test('thumbnail uploads at the thumbnail byte cap still succeed', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock(PRO_PROFILE)
+  try {
+    const response = await worker.fetch(
+      buildUploadRequest({
+        token, bodyBytes: THUMB_UPLOAD_BYTE_CAP, uploadMode: 'reduced', uploadVariant: 'thumb',
+        cloudPlan: 'free', qualityProfile: 'standard', sourceWidth: 4000,
+        sourceHeight: 3000, storedWidth: 400, storedHeight: 300,
+      }),
+      legacyUploadEnv(jwtSecret, { head: async () => null, put: async () => ({ etag: 'thumb-etag' }) }),
+      {},
+    )
+    assert.equal(response.status, 201)
+  } finally { restoreFetch() }
+})
+
+test('legacy uploads store the Worker Cache-Control, not the client value', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock(PRO_PROFILE)
+  const stored = []
+  try {
+    const request = buildUploadRequest({
+      token, bodyBytes: 1234, uploadMode: 'full', uploadVariant: 'full',
+      cloudPlan: 'pro', qualityProfile: 'high', sourceWidth: 100,
+      sourceHeight: 100, storedWidth: 100, storedHeight: 100,
+      contentType: 'image/webp; charset=binary',
+    })
+    const headers = new Headers(request.headers)
+    headers.set('Cache-Control', 'public, max-age=1, s-maxage=99999999')
+    const response = await worker.fetch(
+      new Request(request.url, { method: 'PUT', headers, body: Buffer.alloc(1234, 1) }),
+      legacyUploadEnv(jwtSecret, {
+        head: async () => null,
+        put: async (key, body, options) => { stored.push(options.httpMetadata); return { etag: 'e' } },
+      }),
+      {},
+    )
+    assert.equal(response.status, 201)
+    assert.deepEqual(stored, [{
+      contentType: 'image/webp',
+      cacheControl: 'public, max-age=31536000, immutable',
+    }])
+  } finally { restoreFetch() }
 })

@@ -8,76 +8,79 @@
 // STAGE ORDER (children before parents; R2 objects before DB rows; auth
 // user last):
 //
-//   0. sign_out_everywhere       — admin.auth.admin.signOut(token, 'global').
-//   0b. begin_account_deletion   — rpc begin_account_deletion: write the
+//   1. sign_out_everywhere       — admin.auth.admin.signOut(token, 'global').
+//   2. begin_account_deletion    — rpc begin_account_deletion: write the
 //                                   account-deletion marker (write fence).
-//   1. media_snapshot            — record R2 media keys BEFORE any DB row
+//   3. media_snapshot            — record R2 media keys BEFORE any DB row
 //                                   is deleted. Reads BOTH
 //                                   observation_images.storage_path (which
 //                                   has a paired thumb_ variant by contract)
 //                                   AND observation_images.original_storage_path
 //                                   (owner-only original, standalone — NO
 //                                   thumb companion manufactured).
-//   2. mosaic_media_snapshot     — record spore_measurement_mosaics.storage_key
+//   4. mosaic_media_snapshot     — record spore_measurement_mosaics.storage_key
 //                                   R2 keys BEFORE their DB rows are deleted.
 //                                   Mosaics have no separate thumb variant.
-//   3. calibration_media_snapshot — record calibrations.image_storage_path
+//   5. calibration_media_snapshot — record calibrations.image_storage_path
 //                                   R2 keys BEFORE the rows are deleted.
-//   4. delete_r2_prefix          — list and delete EVERY object under
+//                                   The snapshots are keyset-paged.
+//   6. delete_r2_prefix          — list and delete EVERY object under
 //                                   '<uid>/' in every configured R2 bucket
 //                                   (legacy public and private) through the
-//                                   S3-compatible API (ctx.r2). Since
-//                                   20261020120000 every key column is
-//                                   guaranteed to live under '<uid>/' for
-//                                   every role, so the prefix covers released
-//                                   images (NULL paths), late Worker writes
-//                                   and every variant without guessing.
-//   5. delete_r2_media           — delete each snapshotted R2 media object
-//                                   (observation + mosaic keys). 404 = success.
-//                                   The upload worker attempts both the
-//                                   legacy public bucket AND the private
-//                                   bucket for each key.
-//   4. delete_legacy_storage     — legacy Supabase Storage folders
+//                                   S3-compatible API (ctx.r2). Since the
+//                                   media-key retirement migration every new
+//                                   or changed key column must live under
+//                                   '<uid>/' for every role, so the prefix
+//                                   covers released images (NULL paths), late
+//                                   Worker writes and every variant without
+//                                   guessing.
+//   7. delete_r2_media           — delete each snapshotted R2 media object
+//                                   (observation, mosaic and calibration
+//                                   keys), at most R2_DELETE_CONCURRENCY at
+//                                   once. 404 = success. The upload worker
+//                                   attempts both the legacy public bucket
+//                                   AND the private bucket for each key.
+//   8. delete_legacy_storage     — legacy Supabase Storage folders
 //                                   (observation-images/${uid}, avatars/${uid}).
-//   5. scrub_mentions            — remove ONLY the deleted uid from
+//   9. scrub_mentions            — remove ONLY the deleted uid from
 //                                   comments.mentioned_user_ids of OTHER
 //                                   users' comments. Uses an SQL-safe RPC
 //                                   so co-mentioned uuids in the same row
 //                                   are preserved.
-//   6. delete_client_activity    — client_activity_daily.
-//   7. delete_follows            — follows.user_id + follows.target_id (only
+//  10. delete_client_activity    — client_activity_daily.
+//  11. delete_follows            — follows.user_id + follows.target_id (only
 //                                   when target_type='user' — target_id is
 //                                   polymorphic text).
-//   8. delete_reports            — reports.reporter_id + reported_user_id.
-//   9. delete_identifications    — observation_identifications.user_id.
-//  10. delete_spore_summaries    — observation_spore_summaries.user_id.
-//  11. delete_mosaics            — spore_measurement_mosaics.user_id
-//                                   (R2 objects already gone at step 3).
-//  12. delete_user_blocks        — blocker_id + blocked_id.
-//  13. delete_friendships        — requester_id + addressee_id.
-//  14. delete_observation_shares — owner_id + shared_with_id.
-//  15. delete_comments           — comments.user_id.
-//  16. delete_spore_annotations  — spore_annotations.user_id.
-//  17. delete_spore_measurements — spore_measurements.user_id.
-//  18. delete_reference_library_for_account — atomically mark reference
+//  12. delete_reports            — reports.reporter_id + reported_user_id.
+//  13. delete_identifications    — observation_identifications.user_id.
+//  14. delete_spore_summaries    — observation_spore_summaries.user_id.
+//  15. delete_mosaics            — spore_measurement_mosaics.user_id
+//                                   (R2 objects already gone at steps 6-7).
+//  16. delete_user_blocks        — blocker_id + blocked_id.
+//  17. delete_friendships        — requester_id + addressee_id.
+//  18. delete_observation_shares — owner_id + shared_with_id.
+//  19. delete_comments           — comments.user_id.
+//  20. delete_spore_annotations  — spore_annotations.user_id.
+//  21. delete_spore_measurements — spore_measurements.user_id.
+//  22. delete_reference_library_for_account — atomically mark reference
 //                                   mutations closed and delete the owner's
 //                                   normalized reference graph through the
 //                                   service-role-only RPC of the same name.
-//  19. delete_observation_images — observation_images.user_id
-//                                   (R2 objects already gone at step 3).
-//  20. delete_observations       — observations.user_id.
-//  21. delete_calibrations       — calibrations.user_id.
-//  22. delete_profile            — profiles.id.
-//  23. delete_r2_prefix_second_pass — the prefix delete again, catching
+//  23. delete_observation_images — observation_images.user_id
+//                                   (R2 objects already gone at steps 6-7).
+//  24. delete_observations       — observations.user_id.
+//  25. delete_calibrations       — calibrations.user_id.
+//  26. delete_r2_prefix_second_pass — the prefix delete again, catching
 //                                   uploads that raced the first pass.
-//  24. verify_r2_prefix_empty    — list '<uid>/' in every bucket; anything
+//  27. verify_r2_prefix_empty    — list '<uid>/' in every bucket; anything
 //                                   left fails the run before the account
 //                                   is deleted, so the user can retry.
-//  25. erase_media_retirements   — public.erase_account_media_retirements:
+//  28. erase_media_retirements   — public.erase_account_media_retirements:
 //                                   remove the user's media-key registry rows
 //                                   (allowed only once the account-deletion
 //                                   marker exists and no content rows remain).
-//  26. delete_profile / 27. delete_auth_user — admin.auth.admin.deleteUser(uid). LAST so
+//  29. delete_profile            — profiles.id.
+//  30. delete_auth_user          — admin.auth.admin.deleteUser(uid). LAST so
 //                                   a failure in any earlier stage leaves
 //                                   the auth session intact for retry.
 //
@@ -121,6 +124,62 @@ export async function requireSuccess(label, op) {
     throw new Error(`${label}: ${result.error.message || 'unknown error'}`)
   }
   return result?.data ?? null
+}
+
+// Rows per page for the media snapshots (PostgREST's default max_rows).
+export const SNAPSHOT_PAGE_SIZE = 1000
+// Fail closed instead of looping forever if a server ever ignores the
+// keyset filter and keeps returning the same page.
+export const SNAPSHOT_MAX_PAGES = 1000
+
+function assertSnapshotPageLimit(label, pages) {
+  if (pages >= SNAPSHOT_MAX_PAGES) {
+    throw new Error(`${label}: snapshot exceeded the page limit`)
+  }
+}
+
+// Worker DELETE calls in flight at once in delete_r2_media. An account with
+// thousands of images has tens of thousands of R2 keys (each image has up to
+// four variants); serial calls would run far past the Edge Function time
+// limit. Bounded so the upload Worker and R2 are not flooded.
+export const R2_DELETE_CONCURRENCY = 16
+
+/**
+ * Calls `fn` for every item with at most `limit` calls in flight. Resolves
+ * once every call has settled; `fn` must not throw.
+ * @template T
+ * @param {Iterable<T>} items
+ * @param {number} limit
+ * @param {(item: T, index: number) => Promise<void>} fn
+ */
+export async function forEachWithConcurrency(items, limit, fn) {
+  const list = [...items]
+  let next = 0
+  const runner = async () => {
+    while (next < list.length) {
+      const index = next++
+      await fn(list[index], index)
+    }
+  }
+  const runners = Math.max(1, Math.min(limit, list.length))
+  await Promise.all(Array.from({ length: runners }, runner))
+}
+
+// Keyset pagination on the bigint primary key: each page starts after the
+// last id seen, so a row the user deletes between page requests cannot
+// shift later rows past the scan the way an offset range would.
+function keysetPage(query, lastId) {
+  return (lastId === null ? query : query.gt('id', lastId))
+    .order('id', { ascending: true })
+    .limit(SNAPSHOT_PAGE_SIZE)
+}
+
+function lastRowId(label, rows) {
+  const id = rows[rows.length - 1]?.id
+  if (id === null || id === undefined) {
+    throw new Error(`${label}: snapshot row without an id`)
+  }
+  return id
 }
 
 // ── stages ────────────────────────────────────────────────────────────
@@ -178,21 +237,31 @@ export const STAGES = Object.freeze([
       try {
         // Read BOTH storage_path (paired with thumb_ by contract) and
         // original_storage_path (owner-only original — standalone).
-        const rows = await requireSuccess(
-          'select observation_images.storage_path,original_storage_path',
-          ctx.admin.from('observation_images')
-            .select('storage_path, original_storage_path')
-            .eq('user_id', ctx.uid),
-        )
-        for (const row of rows || []) {
-          // storage_path is the public/derivable variant; add its thumb pair.
-          for (const key of observationMediaDeleteTargets(row.storage_path)) {
-            if (key) ctx.r2Keys.add(key)
+        // Paged: PostgREST caps an unpaged select at its max_rows, which
+        // would silently leave every image past the cap in R2.
+        let lastId = null
+        for (let pages = 0; ; pages++) {
+          assertSnapshotPageLimit('media snapshot', pages)
+          const rows = await requireSuccess(
+            'select observation_images.storage_path,original_storage_path',
+            keysetPage(ctx.admin.from('observation_images')
+              .select('id, storage_path, original_storage_path')
+              .eq('user_id', ctx.uid), lastId),
+          ) || []
+          for (const row of rows) {
+            // storage_path is the public/derivable variant; add its thumb pair.
+            for (const key of observationMediaDeleteTargets(row.storage_path)) {
+              if (key) ctx.r2Keys.add(key)
+            }
+            // original_storage_path is a STANDALONE object — do NOT
+            // manufacture a thumb_ companion. Add the exact key as-is.
+            const original = normalizeStoragePath(row.original_storage_path)
+            if (original) ctx.r2Keys.add(original)
           }
-          // original_storage_path is a STANDALONE object — do NOT
-          // manufacture a thumb_ companion. Add the exact key as-is.
-          const original = normalizeStoragePath(row.original_storage_path)
-          if (original) ctx.r2Keys.add(original)
+          // Stop on an empty page rather than a short one, so a server
+          // max_rows below SNAPSHOT_PAGE_SIZE cannot end the scan early.
+          if (!rows.length) break
+          lastId = lastRowId('media snapshot', rows)
         }
         return { ok: true }
       } catch (err) {
@@ -207,15 +276,21 @@ export const STAGES = Object.freeze([
         // spore_measurement_mosaics.storage_key is a standalone R2 object
         // with no paired thumb — snapshot each key BEFORE the row is
         // deleted so we can remove the R2 object at delete_r2_media.
-        const rows = await requireSuccess(
-          'select spore_measurement_mosaics.storage_key',
-          ctx.admin.from('spore_measurement_mosaics')
-            .select('storage_key')
-            .eq('user_id', ctx.uid),
-        )
-        for (const row of rows || []) {
-          const key = normalizeStoragePath(row.storage_key)
-          if (key) ctx.r2Keys.add(key)
+        let lastId = null
+        for (let pages = 0; ; pages++) {
+          assertSnapshotPageLimit('mosaic media snapshot', pages)
+          const rows = await requireSuccess(
+            'select spore_measurement_mosaics.storage_key',
+            keysetPage(ctx.admin.from('spore_measurement_mosaics')
+              .select('id, storage_key')
+              .eq('user_id', ctx.uid), lastId),
+          ) || []
+          for (const row of rows) {
+            const key = normalizeStoragePath(row.storage_key)
+            if (key) ctx.r2Keys.add(key)
+          }
+          if (!rows.length) break
+          lastId = lastRowId('mosaic media snapshot', rows)
         }
         return { ok: true }
       } catch (err) {
@@ -247,16 +322,23 @@ export const STAGES = Object.freeze([
   {
     name: 'delete_r2_media',
     apply: async ctx => {
+      // Every key is attempted, even after a failure; failures are reported
+      // in snapshot order once all deletes have settled.
+      /** @type {(string | undefined)[]} */
       const failures = []
-      for (const key of ctx.r2Keys) {
-        const outcome = await ctx.worker.deleteKey(key)
-        if (!outcome.ok) {
-          // 404 is idempotent success.
-          if (outcome.status === 404) continue
-          failures.push(`r2 delete failed for ${maskKey(key)}: ${outcome.detail || outcome.status || 'unknown'}`)
+      await forEachWithConcurrency(ctx.r2Keys, R2_DELETE_CONCURRENCY, async (key, index) => {
+        let outcome
+        try {
+          outcome = await ctx.worker.deleteKey(key)
+        } catch (err) {
+          outcome = { ok: false, detail: err?.message }
         }
-      }
-      if (failures.length) return { ok: false, error: failures.join('; ') }
+        // 404 is idempotent success.
+        if (outcome.ok || outcome.status === 404) return
+        failures[index] = `r2 delete failed for ${maskKey(key)}: ${outcome.detail || outcome.status || 'unknown'}`
+      })
+      const errors = failures.filter(Boolean)
+      if (errors.length) return { ok: false, error: errors.join('; ') }
       return { ok: true }
     },
   },
@@ -618,7 +700,10 @@ async function deleteFolderContents(admin, bucket, uid) {
         }
       }
       if (data.length < 1000) break
-      offset += data.length
+      // Removed files drop out of the next listing, so only the entries
+      // still present (sub-folders, nameless items) move the offset.
+      // Advancing by data.length would skip a page of files.
+      offset += data.length - files.length
     }
   }
 }

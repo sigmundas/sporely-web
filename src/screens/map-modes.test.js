@@ -44,6 +44,9 @@ let observations = [OWN_FIND, OTHER_FIND]
 // When set, rows are served per scope so a test can make one scope hold the
 // find and the others come back empty.
 let scopeResults = null
+// When set, every query waits for this promise before answering, so a test
+// can change accounts while a map load is in flight.
+let queryGate = null
 
 const SCOPE_BY_TABLE = {
   observations: 'mine',
@@ -239,7 +242,11 @@ before(async () => {
       neq() { return chain },
       not() { return chain },
       gte() { return chain },
-      then(resolve) { resolve({ data: _rowsForTable(table), error: null }) },
+      then(resolve) {
+        const respond = () => resolve({ data: _rowsForTable(table), error: null })
+        if (queryGate) queryGate.then(respond)
+        else respond()
+      },
     }
     return chain
   }
@@ -461,4 +468,77 @@ test('a find with no coordinates opens the picker without a previous-location ma
   await _settle()
 
   assert.deepEqual(saved, [{ lat: 58.97, lon: 5.73 }])
+})
+
+test('an account transition clears the previous account\'s markers', async () => {
+  const { resetMapForAccountTransition } = await import('../map-loader.js')
+  state.user = { id: 'user-1' }
+  state.observationScope = 'mine'
+  state.mapTimeScope = 'all'
+  state.searchQuery = ''
+  scopeResults = null
+  await loadMap()
+  assert.ok(clusterLayer().items.length > 0, 'precondition: markers are on the map')
+
+  resetMapForAccountTransition()
+
+  assert.equal(clusterLayer().items.length, 0, 'no marker survives the transition')
+})
+
+test('a map load that resolves after an account switch paints nothing', async () => {
+  const { beginAccountTransition } = await import('../account-transition.js')
+  const { resetMapForAccountTransition } = await import('../map-loader.js')
+  state.user = { id: 'user-1' }
+  state.observationScope = 'mine'
+  state.mapTimeScope = 'all'
+  state.searchQuery = ''
+  scopeResults = null
+  resetMapForAccountTransition()
+
+  let release
+  queryGate = new Promise(resolve => { release = resolve })
+  try {
+    const pending = loadMap()
+    // User 1 signs out and user 2 signs in while user 1's query is in flight.
+    beginAccountTransition()
+    resetMapForAccountTransition()
+    state.user = { id: 'user-2' }
+    release()
+    await pending
+  } finally {
+    queryGate = null
+    state.user = { id: 'user-1' }
+  }
+
+  assert.equal(clusterLayer().items.length, 0, 'user 1\'s rows must not be painted for user 2')
+})
+
+test('an account transition closes a location picker opened for the previous account', async () => {
+  const { openMapLocationPicker, isMapLocationPickerActive } = mapModule
+  const { resetMapForAccountTransition } = await import('../map-loader.js')
+  let saved = null
+  openMapLocationPicker({ lat: 63.43, lon: 10.39, onSave: coords => { saved = coords } })
+  await _settle()
+  assert.equal(isMapLocationPickerActive(), true, 'precondition: picker open')
+
+  resetMapForAccountTransition()
+
+  assert.equal(isMapLocationPickerActive(), false, 'the previous account\'s picker and save callback are dropped')
+  assert.equal(pickerLayer().items.length, 0, 'its original coordinate is no longer drawn')
+  assert.equal(saved, null, 'nothing was saved')
+})
+
+test('a picker requested before an account transition does not open after it', async () => {
+  const { isMapLocationPickerActive } = mapModule
+  const { openMapLocationPickerScreen, resetMapForAccountTransition } = await import('../map-loader.js')
+  const { beginAccountTransition } = await import('../account-transition.js')
+  resetMapForAccountTransition()
+  let saved = null
+  const opening = openMapLocationPickerScreen({ lat: 63.43, lon: 10.39, onSave: coords => { saved = coords } })
+  // The account changes while the loader is still awaiting the map module.
+  beginAccountTransition()
+  await opening
+  await _settle()
+  assert.equal(isMapLocationPickerActive(), false)
+  assert.equal(saved, null)
 })
