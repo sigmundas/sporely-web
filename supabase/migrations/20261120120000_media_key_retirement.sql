@@ -33,7 +33,9 @@
 -- 5. Release RPC public.release_observation_image_bytes (authenticated):
 --    one transaction, §L order, replay by operation UUID.
 -- 6. Purge claim public.claim_tombstoned_image_purge (service_role) and a
---    replaced public.finalize_observation_image_purge that requires the claim.
+--    replaced public.finalize_observation_image_purge that requires the claim
+--    and only marks the row purged; the quota is debited per key through the
+--    deletion ledger.
 -- 7. Sweep support public.claim_retired_key_sweep /
 --    public.record_retired_key_sweep (service_role), and
 --    public.media_key_is_retired (service_role, for the Worker in Stage 0b).
@@ -1093,7 +1095,8 @@ $$;
 -- Replaces 20260809130000: refuses unless the row is claimed, still
 -- tombstoned, and linked to a 'purge' record of this image and owner. Now
 -- SECURITY DEFINER with an empty search_path (it reads the private registry
--- and calls the private isolation check); still service_role only.
+-- and calls the private isolation check); still service_role only. It no
+-- longer debits the quota (see the comment in the body).
 CREATE OR REPLACE FUNCTION public.finalize_observation_image_purge(
   p_image_id bigint,
   p_purged_at timestamptz,
@@ -1139,9 +1142,14 @@ BEGIN
       USING ERRCODE = 'P0001', HINT = 'sporely_purge_not_claimed';
   END IF;
 
-  -- Only sizes measured in R2 count: the caller's measurement and the
-  -- server-owned snapshot of an earlier attempt. stored_bytes is written by
-  -- clients and is not trusted for a quota debit.
+  -- The quota debit is no longer made here. Every key of a purge is deleted
+  -- through the per-key deletion ledger (prepare_media_object_deletion /
+  -- finalize_media_object_deletion), which a Worker DELETE of the same key
+  -- shares, so the bytes and the image are debited once whichever deletes
+  -- first. This call marks the row purged and records the bytes the caller
+  -- measured (the R2 sizes only; stored_bytes is client-written).
+  -- quota_changed keeps its name for the existing callers and is true when
+  -- this call marked the row purged.
   v_bytes := greatest(
     0,
     coalesce(p_storage_bytes, 0),
@@ -1155,8 +1163,6 @@ BEGIN
            purge_error = NULL,
            purge_accounting_bytes = v_bytes
      WHERE oi.id = p_image_id;
-
-    PERFORM public.apply_profile_storage_delta(v_image.user_id, -v_bytes, -1);
 
     RETURN QUERY
       SELECT p_image_id, coalesce(p_purged_at, pg_catalog.now()), v_bytes, true;

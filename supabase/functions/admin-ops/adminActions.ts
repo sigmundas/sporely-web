@@ -1236,11 +1236,33 @@ export async function purgeSingleTombstoneRow(
     }
   }
 
+  // The quota is debited per key through the deletion ledger (see
+  // mediaDeleteLedger); finalize_observation_image_purge only marks the row.
+  const ownerId = normalizeText(row.user_id)
+  if (claimedKeys.length && !isValidTombstoneUuid(ownerId)) {
+    const purgeError = 'purge_owner_missing'
+    await updateTombstonePurgeMetadata(context.adminClient, rowId, {
+      purge_attempted_at: now,
+      purge_error: purgeError,
+    })
+    return {
+      ...row,
+      status: 'error',
+      error: purgeError,
+      claim_id: claimId,
+      retirement_id: claimResult.retirement_id ?? null,
+      purge_attempted_at: now,
+      purge_error: purgeError,
+    }
+  }
   let deletion
   try {
-    deletion = claimedKeys.length
-      ? await r2Client.deleteObjects(claimedKeys)
-      : { logicalBytes: 0, targets: [] }
+    if (claimedKeys.length) {
+      const ledger = mediaDeleteLedger(context.adminClient, ownerId, claimedKeys)
+      deletion = await r2Client.deleteObjects(ledger.keys, ledger.hooks)
+    } else {
+      deletion = { logicalBytes: 0, targets: [] }
+    }
   } catch (error) {
     const failure = normalizeActionFailure(error)
     // Only sizes measured in R2 count: stored_bytes is client-written.
@@ -1420,36 +1442,30 @@ export async function runRetiredKeySweep(
         continue
       }
       if (!isTombstonePurgeEnabled(context.env)) break
-      // A purge whose image row still exists is debited by the purge
-      // finalizer (or already was, when image_purged_at is set). Every other
-      // record (a release, or a purge whose row was removed by an observation
-      // hard delete) has its bytes debited per key through the Worker's
-      // ledger, which the desktop's own Worker DELETE of the same keys shares.
-      const purgeFinalizerOwnsQuota = record.reason === 'purge' && record.image_exists !== false
+      // Every key is debited through the Worker's per-key deletion ledger,
+      // which the desktop's and web's own Worker DELETEs of the same keys
+      // share, so the bytes and the image are debited once whichever deletes
+      // first, for a release and a purge alike. The purge finalizer only
+      // marks the row purged.
       try {
         let logicalBytes = 0
         if (keys.length) {
+          const userId = normalizeText(record.user_id)
+          if (!isValidTombstoneUuid(userId)) throw actionError(500, 'sweep_record_user_missing', 'Retirement record has no owner id')
           if (!r2Client) {
             const prepared = await r2ClientFactory(keys[0])
             if (!prepared.ok) throw actionError(prepared.failure.status, prepared.failure.code, prepared.failure.message)
             r2Client = prepared.client
           }
-          let deletion
-          if (purgeFinalizerOwnsQuota) {
-            deletion = await r2Client.deleteObjects(keys)
-          } else {
-            const userId = normalizeText(record.user_id)
-            if (!isValidTombstoneUuid(userId)) throw actionError(500, 'sweep_record_user_missing', 'Retirement record has no owner id')
-            const ledger = mediaDeleteLedger(context.adminClient, userId, keys)
-            deletion = await r2Client.deleteObjects(ledger.keys, ledger.hooks)
-          }
+          const ledger = mediaDeleteLedger(context.adminClient, userId, keys)
+          const deletion = await r2Client.deleteObjects(ledger.keys, ledger.hooks)
           logicalBytes = Number(deletion?.logicalBytes || 0)
         }
         // Finalize only a purge whose image row still exists and is not yet
         // purged. A row removed by account deletion or an observation hard
         // delete (ON DELETE CASCADE), or one already purged, needs no
         // finalize: its keys are deleted and the record counts as done.
-        if (purgeFinalizerOwnsQuota && !record.image_purged_at) {
+        if (record.reason === 'purge' && record.image_exists !== false && !record.image_purged_at) {
           const finalized = await callRpcWithRetry(context.adminClient, 'finalize_observation_image_purge', {
             p_image_id: record.image_id,
             p_purged_at: new Date().toISOString(),
@@ -2013,21 +2029,27 @@ const MEDIA_VARIANT_PREFIX = /^(?:thumb_|small_|medium_|cards_|preview_)/
 // with the size measured in R2 just before the delete. The ledger keeps one
 // row per (user, key), so the sweep and the desktop's Worker DELETE of the
 // same key debit once between them: whichever runs second finds the object
-// gone, prepares 0 bytes and finalizes nothing new. A crash between the
-// delete and the finalize is finished by the next attempt, because prepare
-// keeps the larger earlier snapshot until the row is finalized.
+// gone, prepares 0 bytes and finalizes nothing new. If both measured the
+// object before either deleted it, the second prepare does not re-open the
+// first one's finalized entry, because the key is retired (20261120120000
+// section 13). A crash or a partial bucket failure between the delete and
+// the finalize is finished by the next attempt, because prepare keeps the
+// larger earlier snapshot of each key until its row is finalized.
 //
-// At most one logical image is debited per call: the first held primary
-// key, with keys ordered so an unprefixed file name comes first.
+// The image is debited only on the family's unprefixed primary key (not a
+// small_/medium_/cards_/preview_ copy), so at most one image per family, on
+// every attempt and whichever of the sweep and the Worker deletes that key.
+// If that key is already gone the image is not debited again here; a
+// family whose only primary object was a prefixed copy keeps its image
+// count until recalculate_profile_storage_usage (the safe direction).
+export function isImageLedgerKey(key: string): boolean {
+  return isPrimaryMediaKey(key) && !MEDIA_VARIANT_PREFIX.test(key.split('/').pop() || '')
+}
+
 export function mediaDeleteLedger(adminClient: any, userId: string, keys: string[]) {
-  const ordered = [
-    ...keys.filter(key => !MEDIA_VARIANT_PREFIX.test(key.split('/').pop() || '')),
-    ...keys.filter(key => MEDIA_VARIANT_PREFIX.test(key.split('/').pop() || '')),
-  ]
-  let imageCounted = false
   const hooks: MediaDeleteHooks = {
     beforeDelete: async (key, { bytes, held }) => {
-      const imageCount = !imageCounted && held && isPrimaryMediaKey(key) ? 1 : 0
+      const imageCount = held && isImageLedgerKey(key) ? 1 : 0
       const { error } = await callRpcWithRetry(adminClient, 'prepare_media_object_deletion', {
         p_user_id: userId,
         p_storage_key: key,
@@ -2037,7 +2059,6 @@ export function mediaDeleteLedger(adminClient: any, userId: string, keys: string
       if (error) {
         throw actionError(500, 'media_delete_accounting_prepare_failed', error.message || 'prepare_media_object_deletion failed')
       }
-      if (imageCount) imageCounted = true
     },
     afterDelete: async key => {
       const { error } = await callRpcWithRetry(adminClient, 'finalize_media_object_deletion', {
@@ -2049,7 +2070,7 @@ export function mediaDeleteLedger(adminClient: any, userId: string, keys: string
       }
     },
   }
-  return { keys: ordered, hooks }
+  return { keys, hooks }
 }
 
 export class R2MultiBucketClient {

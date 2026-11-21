@@ -785,7 +785,12 @@ BEGIN
   -- The debit uses only measured bytes: an inflated client-written
   -- stored_bytes does not raise it.
   UPDATE public.observation_images SET stored_bytes = 999999 WHERE id = v_img;
-  PERFORM pg_temp.eq((SELECT q.quota_changed::text || ':' || q.accounted_storage_bytes FROM public.finalize_observation_image_purge(v_img, now(), 10) q), 'true:10', 'finalize after interrupted purge debits measured bytes only');
+  -- The finalizer marks the row purged and records the measured bytes
+  -- (never stored_bytes) but debits nothing: purge keys are debited per key
+  -- through the deletion ledger.
+  UPDATE public.profiles SET total_storage_bytes = 5000, storage_used_bytes = 5000, image_count = 5 WHERE id = a::uuid;
+  PERFORM pg_temp.eq((SELECT q.quota_changed::text || ':' || q.accounted_storage_bytes FROM public.finalize_observation_image_purge(v_img, now(), 10) q), 'true:10', 'finalize after interrupted purge records measured bytes only');
+  PERFORM pg_temp.eq((SELECT row(total_storage_bytes, storage_used_bytes, image_count)::text FROM public.profiles WHERE id = a::uuid), '(5000,5000,5)', 'finalize does not debit the quota');
   PERFORM pg_temp.eq((SELECT q.quota_changed FROM public.finalize_observation_image_purge(v_img, now(), 10) q), false, 'finalize idempotent');
   PERFORM pg_temp.eq((SELECT storage_path FROM public.observation_images WHERE id = v_img), pg_temp.fx('pg.key'), 'tombstone keeps its paths');
   PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format('UPDATE public.observation_images SET deleted_at = NULL WHERE id = %s', v_img)), 'ERR:P0001:sporely_purge_claimed', 'purged row never restored');
