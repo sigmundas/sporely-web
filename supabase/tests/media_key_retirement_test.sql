@@ -490,7 +490,11 @@ BEGIN
     END LOOP;
   END LOOP;
   -- Malformed keys (own prefix) are refused.
-  FOREACH v_bad IN ARRAY ARRAY[a || '/x/../f.webp', a || '/./f.webp', a || '/x/%2Ff.webp', a || '/x/%5cf.webp', a || E'/x/a\\b.webp'] LOOP
+  -- Also every form admin-ops (JS trim) or the Worker would normalize to
+  -- another object, and names whose derived variants would have another root.
+  FOREACH v_bad IN ARRAY ARRAY[a || '/x/../f.webp', a || '/./f.webp', a || '/x/%2Ff.webp', a || '/x/%5cf.webp', a || E'/x/a\\b.webp',
+                               a || E'/x/f.webp\t', a || E'/x/f\n.webp', a || '/x//f.webp', a || E'/x/f.webp ', a || E'/x/f.webp﻿',
+                               a || '/x/small_', a || '/x/thumb_small_', a || '/x/SMALL_f.webp', a || '/x/thumb_Small_f.webp'] LOOP
     PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format('UPDATE public.observations SET image_key = %L WHERE id = %s', v_bad, pg_temp.fxi('att.obs'))), 'ERR:P0001:sporely_media_key_invalid', 'invalid key ' || v_bad);
     PERFORM pg_temp.eq(private.media_key_is_valid(v_bad), false, 'is_valid ' || v_bad);
     PERFORM pg_temp.eq(pg_temp.run('service_role', NULL, format('UPDATE public.observations SET image_key = %L WHERE id = %s', v_bad, pg_temp.fxi('att.obs'))), 'ERR:P0001:sporely_media_key_invalid', 'service_role invalid key ' || v_bad);

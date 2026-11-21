@@ -54,7 +54,11 @@ BEGIN
     IF v_root IS NOT NULL AND NOT (v_root = ANY (v_family)) THEN
       RAISE EXCEPTION 'root % not in family of %', v_root, v_key;
     END IF;
-    IF EXISTS (SELECT 1 FROM unnest(v_family) f WHERE private.media_key_root(f) IS DISTINCT FROM v_root) THEN
+    -- Every member of a VALID key's family shares its root, so a release or
+    -- claim retires every root it deletes from. Invalid keys (for example a
+    -- prefix-only name) are refused before any family is used.
+    IF (c ->> 'valid')::boolean
+       AND EXISTS (SELECT 1 FROM unnest(v_family) f WHERE private.media_key_root(f) IS DISTINCT FROM v_root) THEN
       RAISE EXCEPTION 'family of % has a member with a different root', v_key;
     END IF;
     n := n + 1;

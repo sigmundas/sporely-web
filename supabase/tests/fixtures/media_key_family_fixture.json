@@ -20,7 +20,7 @@
       "preview_"
     ],
     "strip_while_longer_than_prefix": true,
-    "invalid": "a . or .. segment, ANY % (every percent encoding), or a backslash; guard, release and claim refuse such keys",
+    "invalid": "a . or .. segment, ANY % (every percent encoding), a backslash, a control character, an empty segment (//), leading or trailing whitespace that JS trim removes, a filename made only of variant prefixes, or a variant prefix not spelled in lowercase; guard, release and claim refuse such keys",
     "family_sort": "C collation / code point"
   },
   "cases": [
@@ -481,7 +481,7 @@
     },
     {
       "key": "u/o/thumb_",
-      "valid": true,
+      "valid": false,
       "root": "u/o/thumb_",
       "family": [
         "u/o/cards_thumb_",
@@ -498,7 +498,7 @@
     },
     {
       "key": "u/o/thumb_small_",
-      "valid": true,
+      "valid": false,
       "root": "u/o/small_",
       "family": [
         "u/o/cards_small_",
@@ -669,6 +669,118 @@
       "valid": true,
       "root": null,
       "family": []
+    },
+    {
+      "key": "u/o/f.webp\t",
+      "valid": false,
+      "root": "u/o/f.webp\t",
+      "family": [
+        "u/o/cards_f.webp\t",
+        "u/o/f.webp\t",
+        "u/o/medium_f.webp\t",
+        "u/o/preview_f.webp\t",
+        "u/o/small_f.webp\t",
+        "u/o/thumb_cards_f.webp\t",
+        "u/o/thumb_f.webp\t",
+        "u/o/thumb_medium_f.webp\t",
+        "u/o/thumb_preview_f.webp\t",
+        "u/o/thumb_small_f.webp\t"
+      ]
+    },
+    {
+      "key": "u/o//f.webp",
+      "valid": false,
+      "root": "u/o//f.webp",
+      "family": [
+        "u/o//cards_f.webp",
+        "u/o//f.webp",
+        "u/o//medium_f.webp",
+        "u/o//preview_f.webp",
+        "u/o//small_f.webp",
+        "u/o//thumb_cards_f.webp",
+        "u/o//thumb_f.webp",
+        "u/o//thumb_medium_f.webp",
+        "u/o//thumb_preview_f.webp",
+        "u/o//thumb_small_f.webp"
+      ]
+    },
+    {
+      "key": "u/o/f.webp ",
+      "valid": false,
+      "root": "u/o/f.webp ",
+      "family": [
+        "u/o/cards_f.webp ",
+        "u/o/f.webp ",
+        "u/o/medium_f.webp ",
+        "u/o/preview_f.webp ",
+        "u/o/small_f.webp ",
+        "u/o/thumb_cards_f.webp ",
+        "u/o/thumb_f.webp ",
+        "u/o/thumb_medium_f.webp ",
+        "u/o/thumb_preview_f.webp ",
+        "u/o/thumb_small_f.webp "
+      ]
+    },
+    {
+      "key": "u/o/small_",
+      "valid": false,
+      "root": "u/o/small_",
+      "family": [
+        "u/o/cards_small_",
+        "u/o/medium_small_",
+        "u/o/preview_small_",
+        "u/o/small_",
+        "u/o/small_small_",
+        "u/o/thumb_",
+        "u/o/thumb_cards_small_",
+        "u/o/thumb_medium_small_",
+        "u/o/thumb_preview_small_",
+        "u/o/thumb_small_",
+        "u/o/thumb_small_small_"
+      ]
+    },
+    {
+      "key": "u/o/SMALL_f.webp",
+      "valid": false,
+      "root": "u/o/SMALL_f.webp",
+      "family": [
+        "u/o/SMALL_f.webp",
+        "u/o/cards_SMALL_f.webp",
+        "u/o/medium_SMALL_f.webp",
+        "u/o/preview_SMALL_f.webp",
+        "u/o/small_SMALL_f.webp",
+        "u/o/thumb_SMALL_f.webp",
+        "u/o/thumb_cards_SMALL_f.webp",
+        "u/o/thumb_medium_SMALL_f.webp",
+        "u/o/thumb_preview_SMALL_f.webp",
+        "u/o/thumb_small_SMALL_f.webp"
+      ]
+    },
+    {
+      "key": "u/o/thumb_SMALL_f.webp",
+      "valid": false,
+      "root": "u/o/SMALL_f.webp",
+      "family": [
+        "u/o/SMALL_f.webp",
+        "u/o/cards_SMALL_f.webp",
+        "u/o/cards_thumb_SMALL_f.webp",
+        "u/o/medium_SMALL_f.webp",
+        "u/o/medium_thumb_SMALL_f.webp",
+        "u/o/preview_SMALL_f.webp",
+        "u/o/preview_thumb_SMALL_f.webp",
+        "u/o/small_SMALL_f.webp",
+        "u/o/small_thumb_SMALL_f.webp",
+        "u/o/thumb_SMALL_f.webp",
+        "u/o/thumb_cards_SMALL_f.webp",
+        "u/o/thumb_cards_thumb_SMALL_f.webp",
+        "u/o/thumb_medium_SMALL_f.webp",
+        "u/o/thumb_medium_thumb_SMALL_f.webp",
+        "u/o/thumb_preview_SMALL_f.webp",
+        "u/o/thumb_preview_thumb_SMALL_f.webp",
+        "u/o/thumb_small_SMALL_f.webp",
+        "u/o/thumb_small_thumb_SMALL_f.webp",
+        "u/o/thumb_thumb_SMALL_f.webp"
+      ]
     }
   ]
 }

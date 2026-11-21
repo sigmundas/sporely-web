@@ -206,8 +206,19 @@ END
 $$;
 
 -- §K key syntax: refuse '.' / '..' segments, ANY '%' (every percent
--- encoding, e.g. %2F, %5C, %2e) and a literal backslash. The Worker must apply the
--- same rule (Stage 0b).
+-- encoding, e.g. %2F, %5C, %2e) and a literal backslash. Also refuse every
+-- form the other readers normalize differently, so SQL, admin-ops (JS trim)
+-- and the Worker (strips control characters' keys, collapses empty segments)
+-- always name the same object:
+--   * control characters (C0, DEL, C1) anywhere;
+--   * an empty segment ('//');
+--   * leading or trailing whitespace that JS String.prototype.trim removes
+--     but btrim(text) keeps (Unicode space separators, BOM);
+--   * a filename made only of variant prefixes ('small_'): its Worker-derived
+--     thumbnail would have another root;
+--   * a variant prefix in any other spelling than lowercase ('SMALL_f'): the
+--     web client strips prefixes case-insensitively.
+-- The Worker must apply the same rule (Stage 0b).
 CREATE FUNCTION private.media_key_is_valid(p_key text)
 RETURNS boolean
 LANGUAGE sql
@@ -220,8 +231,16 @@ AS $$
     OR '..' = ANY (pg_catalog.string_to_array(s.n, '/'))
     OR pg_catalog.strpos(s.n, '%') > 0
     OR pg_catalog.strpos(s.n, E'\\') > 0
+    OR s.n ~ '[\x01-\x1f\x7f-\x9f]'
+    OR pg_catalog.strpos(s.n, '//') > 0
+    OR s.n ~ '^[    -     　﻿]'
+    OR s.n ~ '[    -     　﻿]$'
+    OR s.f ~ '^(thumb_|small_|medium_|cards_|preview_)+$'
+    OR pg_catalog.regexp_replace(s.f, '^(thumb_|small_|medium_|cards_|preview_)+', '', 'i')
+       <> pg_catalog.regexp_replace(s.f, '^(thumb_|small_|medium_|cards_|preview_)+', '')
   )
-  FROM (SELECT NULLIF(pg_catalog.btrim(pg_catalog.btrim(p_key), '/'), '') AS n) s
+  FROM (SELECT n, pg_catalog.regexp_replace(n, '^.*/', '') AS f
+          FROM (SELECT NULLIF(pg_catalog.btrim(pg_catalog.btrim(p_key), '/'), '') AS n) t) s
 $$;
 
 -- =============================================================
