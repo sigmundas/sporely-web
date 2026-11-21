@@ -1,4 +1,5 @@
 import {
+  canonicalDeleteKeys,
   attachMediaStorageBreakdown,
   buildImageIssueFlags,
   buildIssueSummary,
@@ -703,4 +704,32 @@ Deno.test('sweep: always-failing records do not stop later batches (the database
   assertEquals([result.counts.errors, result.counts.swept], [2, 1])
   const recordCall = admin.calls.find(c => c.startsWith('rpc:record_retired_key_sweep'))!
   assertEquals(JSON.parse(recordCall.split(':').slice(2).join(':')).p_retirement_ids, [40])
+})
+
+Deno.test('canonicalDeleteKeys keeps stored keys verbatim and rejects any the R2 client would rewrite', () => {
+  const uid = '00000000-0000-4000-8000-000000000001'
+  assertEquals(canonicalDeleteKeys([`${uid}/a.webp`, `${uid}/thumb_a.webp`]), { keys: [`${uid}/a.webp`, `${uid}/thumb_a.webp`], rejected: 0 })
+  assertEquals(canonicalDeleteKeys([`${uid}/a.webp\t`, ` ${uid}/b.webp`, `/${uid}/c.webp`, `${uid}/a.webp\u00a0`, '', null, 7]).rejected, 7)
+  assertEquals(canonicalDeleteKeys(undefined), { keys: [], rejected: 0 })
+})
+
+Deno.test('claim-aware purge: a noncanonical claimed key deletes nothing and records the error', async () => {
+  const admin = fakeAdmin({ claim_tombstoned_image_purge: [{ data: { status: 'claimed', retirement_id: 6, delete_keys: ['user/b.webp', 'user/b.webp\t'] }, error: null }] })
+  const r2 = fakeR2()
+  const result: any = await purgeSingleTombstoneRow({ adminClient: admin.client, env: ENABLED }, PURGE_ROW, r2 as any)
+  assertEquals([result.status, result.purge_error, result.retirement_id], ['error', 'noncanonical_delete_key', 6])
+  assertEquals(r2.deleted, [])
+  assertEquals(admin.calls.some(c => c.startsWith('rpc:finalize_observation_image_purge')), false)
+})
+
+Deno.test('sweep: a record with a noncanonical key is reported as guard_failed, not deleted', async () => {
+  const admin = fakeAdmin({
+    claim_retired_key_sweep: [{ data: [{ retirement_id: 4, image_id: 2, reason: 'release', status: 'ok', delete_keys: ['u/x.webp', ' u/y.webp'] }], error: null }],
+    record_retired_key_sweep: [{ data: 1, error: null }],
+  })
+  const r2 = fakeR2()
+  const result: any = await runRetiredKeySweep({ adminClient: admin.client, env: ENABLED }, { limit: 50, batches: 1 }, async () => ({ ok: true, client: r2 as any }))
+  assertEquals(r2.deleted, [])
+  assertEquals(result.counts, { swept: 0, guard_failed: 1, errors: 0, finalized: 0 })
+  assertEquals(result.rows[0].blocking_references, [{ reason: 'noncanonical_delete_key', count: 1 }])
 })

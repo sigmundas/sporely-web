@@ -1214,9 +1214,26 @@ export async function purgeSingleTombstoneRow(
       purge_error: purgeError,
     }
   }
-  const claimedKeys = Array.isArray(claimResult.delete_keys)
-    ? claimResult.delete_keys.map(value => normalizeMediaKey(value)).filter(Boolean)
-    : []
+  // The claim's keys are passed to R2 as stored. A key the R2 client would
+  // normalize into another object (whitespace, a leading slash) is refused
+  // and nothing is deleted for this row.
+  const { keys: claimedKeys, rejected: rejectedClaimKeys } = canonicalDeleteKeys(claimResult.delete_keys)
+  if (rejectedClaimKeys > 0) {
+    const purgeError = 'noncanonical_delete_key'
+    await updateTombstonePurgeMetadata(context.adminClient, rowId, {
+      purge_attempted_at: now,
+      purge_error: purgeError,
+    })
+    return {
+      ...row,
+      status: 'error',
+      error: purgeError,
+      claim_id: claimId,
+      retirement_id: claimResult.retirement_id ?? null,
+      purge_attempted_at: now,
+      purge_error: purgeError,
+    }
+  }
 
   let deletion
   try {
@@ -1392,10 +1409,13 @@ export async function runRetiredKeySweep(
 
     for (const record of records) {
       const retirementId = Number(record.retirement_id)
-      const keys = Array.isArray(record.delete_keys) ? record.delete_keys.map((k: unknown) => normalizeMediaKey(k)).filter(Boolean) : []
-      if (record.status !== 'ok') {
+      const { keys, rejected: rejectedKeys } = canonicalDeleteKeys(record.delete_keys)
+      if (record.status !== 'ok' || rejectedKeys > 0) {
         counts.guard_failed += 1
-        rows.push({ retirement_id: retirementId, image_id: record.image_id, reason: record.reason, status: 'guard_failed', blocking_references: record.blocking_references ?? null })
+        const blocking = record.status !== 'ok'
+          ? (record.blocking_references ?? null)
+          : [{ reason: 'noncanonical_delete_key', count: rejectedKeys }]
+        rows.push({ retirement_id: retirementId, image_id: record.image_id, reason: record.reason, status: 'guard_failed', blocking_references: blocking })
         recordedIds.push(retirementId) // rotate it to the back of the queue; it is reported, never deleted
         continue
       }
@@ -1589,6 +1609,19 @@ function stripLegacyVariantPrefixes(fileName: string) {
 
 function normalizeMediaKey(value: unknown) {
   return normalizeText(value).replace(/^\/+/, '')
+}
+
+// Retirement delete_keys are stored already normalized by SQL. Keep each
+// key byte-for-byte; any value normalizeMediaKey would change (or a
+// non-string) is counted as rejected so the caller deletes nothing.
+export function canonicalDeleteKeys(values: unknown): { keys: string[]; rejected: number } {
+  const keys: string[] = []
+  let rejected = 0
+  for (const value of Array.isArray(values) ? values : []) {
+    if (typeof value === 'string' && value.length > 0 && normalizeMediaKey(value) === value) keys.push(value)
+    else rejected += 1
+  }
+  return { keys, rejected }
 }
 
 function normalizeRecord(value: unknown) {
