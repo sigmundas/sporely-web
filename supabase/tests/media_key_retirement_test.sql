@@ -176,7 +176,9 @@ BEGIN
     ('public.claim_tombstoned_image_purge(uuid,bigint,integer)', 'postgres,service_role'),
     ('public.claim_retired_key_sweep(integer)', 'postgres,service_role'),
     ('public.record_retired_key_sweep(bigint[])', 'postgres,service_role'),
-    ('public.finalize_observation_image_purge(bigint,timestamptz,bigint)', 'postgres,service_role')
+    ('public.finalize_observation_image_purge(bigint,timestamptz,bigint)', 'postgres,service_role'),
+    ('private.media_key_retired_at(text)', 'postgres'),
+    ('public.prepare_media_object_deletion(uuid,text,bigint,integer)', 'postgres,service_role')
   ) AS t(fn, expected) LOOP
     PERFORM pg_temp.eq(pg_temp.exec_grantees(r.fn::regprocedure), r.expected, 'EXECUTE grantees of ' || r.fn);
   END LOOP;
@@ -186,7 +188,9 @@ BEGIN
                             'private.release_observation_image_bytes_core(uuid,bigint,text,text,text)'::regprocedure,
                             'private.claim_tombstoned_image_purge_core(uuid,bigint,integer)'::regprocedure,
                             'public.release_observation_image_bytes(uuid,bigint,text,text,text)'::regprocedure,
-                            'public.finalize_observation_image_purge(bigint,timestamptz,bigint)'::regprocedure) LOOP
+                            'public.finalize_observation_image_purge(bigint,timestamptz,bigint)'::regprocedure,
+                            'private.media_key_retired_at(text)'::regprocedure,
+                            'public.prepare_media_object_deletion(uuid,text,bigint,integer)'::regprocedure) LOOP
     PERFORM pg_temp.eq(r.prosecdef, true, r.fn || ' is SECURITY DEFINER');
     PERFORM pg_temp.eq('search_path=""'::text = ANY (r.proconfig), true, r.fn || ' has an empty search_path');
   END LOOP;
@@ -194,6 +198,8 @@ BEGIN
   PERFORM pg_temp.eq('lock_timeout=5s'::text = ANY ((SELECT proconfig FROM pg_proc WHERE oid = 'private.claim_tombstoned_image_purge_core(uuid,bigint,integer)'::regprocedure)::text[]), true, 'claim lock_timeout');
   PERFORM pg_temp.eq((SELECT provolatile FROM pg_proc WHERE oid = 'private.media_key_root(text)'::regprocedure), 'i'::"char", 'root IMMUTABLE');
   PERFORM pg_temp.eq((SELECT provolatile FROM pg_proc WHERE oid = 'private.media_key_family(text)'::regprocedure), 'i'::"char", 'family IMMUTABLE');
+  -- Fresh snapshot after a wait for the ledger row lock.
+  PERFORM pg_temp.eq((SELECT provolatile FROM pg_proc WHERE oid = 'private.media_key_retired_at(text)'::regprocedure), 'v'::"char", 'retired_at VOLATILE');
 
   -- Unconditional BEFORE INSERT OR UPDATE row triggers, sorting last.
   FOR r IN SELECT t.tbl, (SELECT pg_get_triggerdef(tg.oid) FROM pg_trigger tg
@@ -785,11 +791,18 @@ BEGIN
   -- The debit uses only measured bytes: an inflated client-written
   -- stored_bytes does not raise it.
   UPDATE public.observation_images SET stored_bytes = 999999 WHERE id = v_img;
+  -- Two earlier attempts debited two keys of the record through the ledger
+  -- (60 + 25 bytes); the finalizer records their sum, not the largest
+  -- single measurement.
+  PERFORM public.prepare_media_object_deletion(a::uuid, k1, 60, 1), public.finalize_media_object_deletion(a::uuid, k1),
+          public.prepare_media_object_deletion(a::uuid, k2, 25, 0), public.finalize_media_object_deletion(a::uuid, k2)
+     FROM (SELECT delete_keys[1] AS k1, delete_keys[2] AS k2 FROM private.media_key_retirements
+            WHERE id = (SELECT purge_retirement_id FROM public.observation_images WHERE id = v_img)) d;
   -- The finalizer marks the row purged and records the measured bytes
   -- (never stored_bytes) but debits nothing: purge keys are debited per key
   -- through the deletion ledger.
   UPDATE public.profiles SET total_storage_bytes = 5000, storage_used_bytes = 5000, image_count = 5 WHERE id = a::uuid;
-  PERFORM pg_temp.eq((SELECT q.quota_changed::text || ':' || q.accounted_storage_bytes FROM public.finalize_observation_image_purge(v_img, now(), 10) q), 'true:10', 'finalize after interrupted purge records measured bytes only');
+  PERFORM pg_temp.eq((SELECT q.quota_changed::text || ':' || q.accounted_storage_bytes FROM public.finalize_observation_image_purge(v_img, now(), 10) q), 'true:85', 'finalize after interrupted purge records measured bytes only (ledger sum)');
   PERFORM pg_temp.eq((SELECT row(total_storage_bytes, storage_used_bytes, image_count)::text FROM public.profiles WHERE id = a::uuid), '(5000,5000,5)', 'finalize does not debit the quota');
   PERFORM pg_temp.eq((SELECT q.quota_changed FROM public.finalize_observation_image_purge(v_img, now(), 10) q), false, 'finalize idempotent');
   PERFORM pg_temp.eq((SELECT storage_path FROM public.observation_images WHERE id = v_img), pg_temp.fx('pg.key'), 'tombstone keeps its paths');
@@ -1023,6 +1036,7 @@ DECLARE
   b text := pg_temp.fx('B');
   v_retired text;
   v_live text := pg_temp.fx('B') || '/ledger-live/x.webp';
+  v_ret bigint;
 BEGIN
   SELECT key_root INTO v_retired
     FROM private.retired_media_key_roots WHERE user_id = b::uuid ORDER BY key_root LIMIT 1;
@@ -1043,6 +1057,22 @@ BEGIN
   PERFORM pg_temp.eq((SELECT finalized_at IS NULL FROM public.media_object_deletion_accounting WHERE user_id = b::uuid AND storage_key = v_live), true, 'live key: a measured prepare re-opens the entry');
   PERFORM public.finalize_media_object_deletion(b::uuid, v_live);
   PERFORM pg_temp.eq((SELECT total_storage_bytes FROM public.profiles WHERE id = b::uuid), 800::bigint, 'live key re-upload debited again');
+
+  -- An entry finalized BEFORE its key was retired can still be re-opened:
+  -- the key may have been uploaded again while it was live.
+  UPDATE public.media_object_deletion_accounting SET finalized_at = now() - interval '1 hour'
+   WHERE user_id = b::uuid AND storage_key = v_live;
+  INSERT INTO private.media_key_retirements (user_id, image_id, reason, operation_id, delete_keys)
+  VALUES (b::uuid, -2, 'release', gen_random_uuid(), ARRAY[v_live]) RETURNING id INTO v_ret;
+  INSERT INTO private.retired_media_key_roots (user_id, key_root, retirement_id) VALUES (b::uuid, v_live, v_ret);
+  PERFORM pg_temp.eq(public.media_key_is_retired(b::uuid, v_live), true, 'live key now retired');
+  PERFORM public.prepare_media_object_deletion(b::uuid, v_live, 70, 1);
+  PERFORM pg_temp.eq((SELECT finalized_at IS NULL FROM public.media_object_deletion_accounting WHERE user_id = b::uuid AND storage_key = v_live), true, 'retired key finalized before its retirement re-opens');
+  PERFORM public.finalize_media_object_deletion(b::uuid, v_live);
+  PERFORM pg_temp.eq((SELECT row(total_storage_bytes, image_count)::text FROM public.profiles WHERE id = b::uuid), '(730,1)', 're-upload before retirement debited');
+  -- A second measured prepare now (finalized after the retirement) stays closed.
+  PERFORM public.prepare_media_object_deletion(b::uuid, v_live, 70, 1);
+  PERFORM pg_temp.eq((SELECT finalized_at IS NOT NULL FROM public.media_object_deletion_accounting WHERE user_id = b::uuid AND storage_key = v_live), true, 'retired key finalized after its retirement stays closed');
 
   -- A zero-byte prepare (object already gone) never re-opens either kind.
   PERFORM public.prepare_media_object_deletion(b::uuid, v_live, 0, 0);

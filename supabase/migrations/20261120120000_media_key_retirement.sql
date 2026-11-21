@@ -43,8 +43,8 @@
 -- 9. Obsolete-desktop brake (20261015090000): accept sync identity '2' or '3'.
 -- 10. admin_database_health classifies the two registry tables (body of
 --     20261020100100 verbatim plus one rule).
--- 11. prepare_media_object_deletion keeps a finalized ledger entry of a
---     retired key finalized (no double debit from overlapping deletes).
+-- 11. prepare_media_object_deletion keeps a ledger entry finalized after its
+--     key's retirement finalized (no double debit from overlapping deletes).
 --
 -- Isolation: the guard (when it has work) and every new function refuse to
 -- run outside READ COMMITTED (HINT sporely_requires_read_committed): the
@@ -1153,7 +1153,16 @@ BEGIN
   v_bytes := greatest(
     0,
     coalesce(p_storage_bytes, 0),
-    coalesce(v_image.purge_accounting_bytes, 0)
+    coalesce(v_image.purge_accounting_bytes, 0),
+    -- The ledger's total for the purge record's keys: it sums every attempt
+    -- (and any Worker DELETE of those keys) per key.
+    coalesce((
+      SELECT sum(a.storage_bytes)
+        FROM private.media_key_retirements r
+        JOIN public.media_object_deletion_accounting a
+          ON a.user_id = r.user_id AND a.storage_key = ANY (r.delete_keys)
+       WHERE r.id = v_image.purge_retirement_id
+    ), 0)
   );
 
   IF v_image.purged_at IS NULL THEN
@@ -1654,15 +1663,38 @@ ALTER FUNCTION private.admin_database_health_classify(text, text, boolean) OWNER
 REVOKE ALL ON FUNCTION private.admin_database_health_classify(text, text, boolean) FROM PUBLIC, anon, authenticated, service_role;
 
 -- =============================================================
--- 13. Deletion ledger: a closed entry for a retired key stays closed.
+-- 13. Deletion ledger: a closed entry of a retired key stays closed.
 -- =============================================================
 -- prepare_media_object_deletion (20260809130000) re-opens a finalized entry
 -- when a later call measures bytes, so a key that was uploaded again after
--- its delete can be debited again. A retired key root is never uploaded to
--- again, so for a retired key a re-open can only come from two deletes of
--- the same object that both measured it before either deleted it (the sweep
--- and a Worker DELETE, or two Worker DELETEs). That would debit the same
--- bytes twice. For a retired key the entry stays finalized instead.
+-- its delete can be debited again. Once a key root is retired it is never
+-- uploaded to again, so an entry finalized after the retirement can only be
+-- re-opened by a second delete of the same object that measured it before
+-- the first delete (the sweep and a Worker DELETE, or two Worker DELETEs).
+-- That would debit the same bytes twice, so such an entry stays finalized.
+-- An entry finalized before the retirement can still be re-opened: the key
+-- may have been uploaded again while it was live.
+--
+-- The retirement time is read by a VOLATILE function, so it uses a fresh
+-- snapshot after any wait for the ledger row lock (a retirement that
+-- commits during that wait is seen).
+CREATE FUNCTION private.media_key_retired_at(p_key text)
+RETURNS timestamptz
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+  SELECT min(r.retired_at)
+    FROM private.retired_media_key_roots rr
+    JOIN private.media_key_retirements r ON r.id = rr.retirement_id
+   WHERE rr.key_root = private.media_key_root(p_key)
+$$;
+REVOKE ALL ON FUNCTION private.media_key_retired_at(text) FROM PUBLIC, anon, authenticated, service_role;
+
+-- Now SECURITY DEFINER with an empty search_path (it calls the private
+-- helper); CREATE OR REPLACE keeps the 20260809130000 grants (service_role
+-- only).
 CREATE OR REPLACE FUNCTION public.prepare_media_object_deletion(
   p_user_id uuid,
   p_storage_key text,
@@ -1671,10 +1703,10 @@ CREATE OR REPLACE FUNCTION public.prepare_media_object_deletion(
 )
 RETURNS void
 LANGUAGE sql
-SECURITY INVOKER
-SET search_path TO 'public'
+SECURITY DEFINER
+SET search_path = ''
 AS $$
-  INSERT INTO public.media_object_deletion_accounting (
+  INSERT INTO public.media_object_deletion_accounting AS a (
     user_id, storage_key, storage_bytes, image_count
   )
   VALUES (
@@ -1685,39 +1717,38 @@ AS $$
   )
   ON CONFLICT (user_id, storage_key) DO UPDATE
      SET storage_bytes = CASE
-           WHEN media_object_deletion_accounting.finalized_at IS NOT NULL
+           WHEN a.finalized_at IS NOT NULL
                 AND (EXCLUDED.storage_bytes > 0 OR EXCLUDED.image_count > 0)
-                AND NOT public.media_key_is_retired(EXCLUDED.user_id, EXCLUDED.storage_key)
+                AND coalesce(a.finalized_at < private.media_key_retired_at(EXCLUDED.storage_key), true)
              THEN EXCLUDED.storage_bytes
-           WHEN media_object_deletion_accounting.finalized_at IS NOT NULL
-             THEN media_object_deletion_accounting.storage_bytes
-           ELSE greatest(media_object_deletion_accounting.storage_bytes, EXCLUDED.storage_bytes)
+           WHEN a.finalized_at IS NOT NULL
+             THEN a.storage_bytes
+           ELSE greatest(a.storage_bytes, EXCLUDED.storage_bytes)
          END,
          image_count = CASE
-           WHEN media_object_deletion_accounting.finalized_at IS NOT NULL
+           WHEN a.finalized_at IS NOT NULL
                 AND (EXCLUDED.storage_bytes > 0 OR EXCLUDED.image_count > 0)
-                AND NOT public.media_key_is_retired(EXCLUDED.user_id, EXCLUDED.storage_key)
+                AND coalesce(a.finalized_at < private.media_key_retired_at(EXCLUDED.storage_key), true)
              THEN EXCLUDED.image_count
-           WHEN media_object_deletion_accounting.finalized_at IS NOT NULL
-             THEN media_object_deletion_accounting.image_count
-           ELSE greatest(media_object_deletion_accounting.image_count, EXCLUDED.image_count)
+           WHEN a.finalized_at IS NOT NULL
+             THEN a.image_count
+           ELSE greatest(a.image_count, EXCLUDED.image_count)
          END,
          prepared_at = CASE
-           WHEN media_object_deletion_accounting.finalized_at IS NOT NULL
+           WHEN a.finalized_at IS NOT NULL
                 AND (EXCLUDED.storage_bytes > 0 OR EXCLUDED.image_count > 0)
-                AND NOT public.media_key_is_retired(EXCLUDED.user_id, EXCLUDED.storage_key)
+                AND coalesce(a.finalized_at < private.media_key_retired_at(EXCLUDED.storage_key), true)
              THEN now()
-           ELSE media_object_deletion_accounting.prepared_at
+           ELSE a.prepared_at
          END,
          finalized_at = CASE
-           WHEN media_object_deletion_accounting.finalized_at IS NOT NULL
+           WHEN a.finalized_at IS NOT NULL
                 AND (EXCLUDED.storage_bytes > 0 OR EXCLUDED.image_count > 0)
-                AND NOT public.media_key_is_retired(EXCLUDED.user_id, EXCLUDED.storage_key)
+                AND coalesce(a.finalized_at < private.media_key_retired_at(EXCLUDED.storage_key), true)
              THEN NULL
-           ELSE media_object_deletion_accounting.finalized_at
+           ELSE a.finalized_at
          END;
 $$;
--- CREATE OR REPLACE keeps the 20260809130000 grants (service_role only).
 
 NOTIFY pgrst, 'reload schema';
 
