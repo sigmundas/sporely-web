@@ -782,7 +782,10 @@ BEGIN
   PERFORM pg_temp.eq(v_seen, 1, 'sweep saw the interrupted purge');
   PERFORM pg_temp.eq(public.record_retired_key_sweep(v_ids), cardinality(v_ids), 'record count');
   PERFORM pg_temp.eq((SELECT count(*) FROM private.media_key_retirements WHERE last_swept_at IS NULL AND user_id = pg_temp.fx('A')::uuid), 0::bigint, 'all swept');
-  PERFORM pg_temp.eq((SELECT q.quota_changed FROM public.finalize_observation_image_purge(v_img, now(), 10) q), true, 'finalize after interrupted purge');
+  -- The debit uses only measured bytes: an inflated client-written
+  -- stored_bytes does not raise it.
+  UPDATE public.observation_images SET stored_bytes = 999999 WHERE id = v_img;
+  PERFORM pg_temp.eq((SELECT q.quota_changed::text || ':' || q.accounted_storage_bytes FROM public.finalize_observation_image_purge(v_img, now(), 10) q), 'true:10', 'finalize after interrupted purge debits measured bytes only');
   PERFORM pg_temp.eq((SELECT q.quota_changed FROM public.finalize_observation_image_purge(v_img, now(), 10) q), false, 'finalize idempotent');
   PERFORM pg_temp.eq((SELECT storage_path FROM public.observation_images WHERE id = v_img), pg_temp.fx('pg.key'), 'tombstone keeps its paths');
   PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format('UPDATE public.observation_images SET deleted_at = NULL WHERE id = %s', v_img)), 'ERR:P0001:sporely_purge_claimed', 'purged row never restored');

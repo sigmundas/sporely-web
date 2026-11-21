@@ -744,3 +744,19 @@ Deno.test('sweep: a record with a noncanonical key is reported as guard_failed, 
   assertEquals(result.counts, { swept: 0, guard_failed: 1, errors: 0, finalized: 0 })
   assertEquals(result.rows[0].blocking_references, [{ reason: 'noncanonical_delete_key', count: 1 }])
 })
+
+Deno.test('purge accounting ignores the client-written stored_bytes', async () => {
+  const admin = fakeAdmin({
+    claim_tombstoned_image_purge: [{ data: { status: 'claimed', retirement_id: 5, delete_keys: ['user/b.webp'] }, error: null }],
+    finalize_observation_image_purge: [{ data: [{ quota_changed: true }], error: null }],
+  })
+  const result: any = await purgeSingleTombstoneRow({ adminClient: admin.client, env: ENABLED }, { ...PURGE_ROW, stored_bytes: 999999 }, fakeR2() as any)
+  assertEquals(result.logical_bytes_deleted, 42)
+  const finalize = admin.calls.find(c => c.startsWith('rpc:finalize_observation_image_purge'))!
+  assertEquals(JSON.parse(finalize.split(':').slice(2).join(':')).p_storage_bytes, 42)
+  assertEquals(admin.updates.map(u => u.purge_accounting_bytes), [42])
+
+  const failing = fakeAdmin({ claim_tombstoned_image_purge: [{ data: { status: 'claimed', delete_keys: ['user/b.webp'] }, error: null }] })
+  await purgeSingleTombstoneRow({ adminClient: failing.client, env: ENABLED }, { ...PURGE_ROW, stored_bytes: 999999 }, fakeR2({ fail: true }) as any)
+  assertEquals(failing.updates.map(u => u.purge_accounting_bytes), [0])
+})

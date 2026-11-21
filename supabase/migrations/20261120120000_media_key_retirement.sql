@@ -1137,11 +1137,13 @@ BEGIN
       USING ERRCODE = 'P0001', HINT = 'sporely_purge_not_claimed';
   END IF;
 
+  -- Only sizes measured in R2 count: the caller's measurement and the
+  -- server-owned snapshot of an earlier attempt. stored_bytes is written by
+  -- clients and is not trusted for a quota debit.
   v_bytes := greatest(
     0,
     coalesce(p_storage_bytes, 0),
-    coalesce(v_image.purge_accounting_bytes, 0),
-    coalesce(v_image.stored_bytes, 0)
+    coalesce(v_image.purge_accounting_bytes, 0)
   );
 
   IF v_image.purged_at IS NULL THEN

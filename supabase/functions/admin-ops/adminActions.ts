@@ -1243,10 +1243,10 @@ export async function purgeSingleTombstoneRow(
       : { logicalBytes: 0, targets: [] }
   } catch (error) {
     const failure = normalizeActionFailure(error)
+    // Only sizes measured in R2 count: stored_bytes is client-written.
     const retryAccountingBytes = Math.max(
       0,
       Number(row.purge_accounting_bytes || 0),
-      Number(row.stored_bytes || 0),
       Number(failure.details?.logicalBytes || 0),
     )
     await updateTombstonePurgeMetadata(context.adminClient, rowId, {
@@ -1269,7 +1269,6 @@ export async function purgeSingleTombstoneRow(
     0,
     Number(deletion.logicalBytes || 0),
     Number(row.purge_accounting_bytes || 0),
-    Number(row.stored_bytes || 0),
   )
   const snapshotResult = await updateTombstonePurgeMetadata(context.adminClient, rowId, {
     purge_attempted_at: now,
