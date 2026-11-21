@@ -577,6 +577,19 @@ BEGIN
   PERFORM pg_temp.eq(pg_temp.run('service_role', NULL, format($q$UPDATE public.observations SET image_key = %L WHERE id = %s$q$, a || '/p1/thumb_tomb.webp', pg_temp.fxi('pglive.obs'))), 'ERR:P0001:sporely_media_key_released', 'claimed key attach');
   -- Ordinary admin metadata writes on the claimed row still work.
   PERFORM pg_temp.eq(pg_temp.run('service_role', NULL, format($q$UPDATE public.observation_images SET purge_attempted_at = now(), purge_error = NULL WHERE id = %s RETURNING 'ok'$q$, v_img)), 'ok:ok', 'purge metadata update on claimed row');
+  -- A claimed row keeps its keys and owner, for every role.
+  FOREACH v_role IN ARRAY ARRAY['authenticated', 'service_role', 'postgres'] LOOP
+    PERFORM pg_temp.eq(pg_temp.run(v_role, a::uuid, format('UPDATE public.observation_images SET storage_path = %L WHERE id = %s', a || '/p1/fresh_' || v_role || '.webp', v_img)), 'ERR:P0001:sporely_purge_claimed', v_role || ' new storage_path on claimed row');
+    PERFORM pg_temp.eq(pg_temp.run(v_role, a::uuid, format('UPDATE public.observation_images SET original_storage_path = %L WHERE id = %s', a || '/originals/1/fresh_' || v_role || '.jpg', v_img)), 'ERR:P0001:sporely_purge_claimed', v_role || ' new original on claimed row');
+    PERFORM pg_temp.eq(pg_temp.run(v_role, a::uuid, format('UPDATE public.observation_images SET storage_path = NULL WHERE id = %s', v_img)), 'ERR:P0001:sporely_purge_claimed', v_role || ' cleared storage_path on claimed row');
+  END LOOP;
+  PERFORM pg_temp.eq(pg_temp.run('service_role', NULL, format('UPDATE public.observation_images SET user_id = %L WHERE id = %s', b, v_img)) LIKE 'ERR:%', true, 'owner change on claimed row refused');
+  -- End users never write purge bookkeeping, on any row.
+  PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format('UPDATE public.observation_images SET purge_error = %L WHERE id = %s', 'x', v_img)), 'ERR:P0001:sporely_purge_server_owned', 'authenticated purge_error');
+  PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format('UPDATE public.observation_images SET purge_attempted_at = now() - interval ''2 days'' WHERE id = %s', v_img)), 'ERR:P0001:sporely_purge_server_owned', 'authenticated purge_attempted_at');
+  PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format('UPDATE public.observation_images SET purge_accounting_bytes = 1 WHERE id = %s', pg_temp.fxi('pglive.img'))), 'ERR:P0001:sporely_purge_server_owned', 'authenticated purge_accounting_bytes on a live row');
+  PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format('UPDATE public.observation_images SET purged_at = now() WHERE id = %s', pg_temp.fxi('pglive.img'))), 'ERR:P0001:sporely_purge_server_owned', 'authenticated purged_at on a live row');
+  PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format('INSERT INTO public.observation_images (observation_id, user_id, image_type, purge_accounting_bytes) VALUES (%s, %L, %L, 5)', pg_temp.fxi('pglive.obs'), a, 'field')), 'ERR:P0001:sporely_purge_server_owned', 'authenticated INSERT with purge bookkeeping');
 
   INSERT INTO fx VALUES ('pg.claim', v_claim::text), ('pg.key', k);
 END $$;
@@ -715,6 +728,7 @@ DECLARE
   r record;
   v_ids bigint[];
   v_seen int := 0;
+  v_role text;
 BEGIN
   PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, 'SELECT count(*) FROM public.claim_retired_key_sweep(10)') LIKE 'ERR:42501:%', true, 'authenticated sweep refused');
   PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, 'SELECT public.record_retired_key_sweep(ARRAY[1]::bigint[])') LIKE 'ERR:42501:%', true, 'authenticated record refused');
@@ -756,6 +770,13 @@ BEGIN
   PERFORM pg_temp.eq((SELECT q.quota_changed FROM public.finalize_observation_image_purge(v_img, now(), 10) q), false, 'finalize idempotent');
   PERFORM pg_temp.eq((SELECT storage_path FROM public.observation_images WHERE id = v_img), pg_temp.fx('pg.key'), 'tombstone keeps its paths');
   PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format('UPDATE public.observation_images SET deleted_at = NULL WHERE id = %s', v_img)), 'ERR:P0001:sporely_purge_claimed', 'purged row never restored');
+  -- purged_at never changes once set (every role), so finalize cannot be
+  -- re-armed for a second quota debit.
+  FOREACH v_role IN ARRAY ARRAY['authenticated', 'service_role', 'postgres'] LOOP
+    PERFORM pg_temp.eq(pg_temp.run(v_role, a::uuid, format('UPDATE public.observation_images SET purged_at = NULL WHERE id = %s', v_img)), 'ERR:P0001:sporely_purge_server_owned', v_role || ' clear purged_at');
+  END LOOP;
+  PERFORM pg_temp.eq(pg_temp.run('service_role', NULL, format('UPDATE public.observation_images SET purged_at = now() - interval ''1 day'' WHERE id = %s', v_img)), 'ERR:P0001:sporely_purge_server_owned', 'service_role move purged_at');
+  PERFORM pg_temp.eq((SELECT q.quota_changed FROM public.finalize_observation_image_purge(v_img, now(), 10) q), false, 'finalize still idempotent');
 
   -- Any other reference is reported: plant one behind the guard's back
   -- (owner-only, rolled back), as a Worker write before retirement would.

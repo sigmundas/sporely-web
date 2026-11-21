@@ -140,9 +140,13 @@ BEGIN
     '2030-01-01 00:00:00+00', '2030-01-01 00:00:00+00'
   );
   UPDATE public.observation_images SET deleted_at = now() WHERE id = image_c;
+  -- purged_at is server-owned: the media-key guard refuses it from an
+  -- end-user context (auth.uid() set), so stage this row as the server.
+  PERFORM set_config('request.jwt.claim.sub', '', true);
   UPDATE public.observation_images
   SET captured_at = '2029-01-01 00:00:00+00', deleted_at = now(), purged_at = now()
   WHERE id = image_a;
+  PERFORM set_config('request.jwt.claim.sub', owner_id::text, true);
   IF public.get_observation_latest_microscope_captured_at(obs_id)
       IS DISTINCT FROM '2026-08-01 00:00:00+00'::timestamptz THEN
     RAISE EXCEPTION 'Field, deleted, or purged image affected Last microscopy';

@@ -557,6 +557,39 @@ BEGIN
       v_claim_change := (v_new -> 'purge_claimed_at') IS DISTINCT FROM (v_old -> 'purge_claimed_at')
                      OR (v_new -> 'purge_retirement_id') IS DISTINCT FROM (v_old -> 'purge_retirement_id');
     END IF;
+
+    -- Purge bookkeeping is server-owned. The finalizer debits quota once,
+    -- gated on purged_at IS NULL, by purge_accounting_bytes: purged_at never
+    -- changes once set (every role), and end-user callers (the same trust
+    -- boundary as _media_guard_key_ownership_image: auth.uid() set) may not
+    -- write any of the purge columns.
+    IF TG_OP = 'UPDATE' AND (v_old ->> 'purged_at') IS NOT NULL
+       AND (v_new -> 'purged_at') IS DISTINCT FROM (v_old -> 'purged_at') THEN
+      RAISE EXCEPTION 'The purge state of this image is server-owned and cannot be changed. Nothing was changed in the cloud.'
+        USING ERRCODE = 'P0001', HINT = 'sporely_purge_server_owned';
+    END IF;
+    IF auth.uid() IS NOT NULL AND (
+         (TG_OP = 'INSERT' AND ((v_new ->> 'purged_at') IS NOT NULL
+                                OR (v_new ->> 'purge_accounting_bytes') IS NOT NULL
+                                OR (v_new ->> 'purge_attempted_at') IS NOT NULL
+                                OR (v_new ->> 'purge_error') IS NOT NULL))
+      OR (TG_OP = 'UPDATE' AND ((v_new -> 'purged_at') IS DISTINCT FROM (v_old -> 'purged_at')
+                                OR (v_new -> 'purge_accounting_bytes') IS DISTINCT FROM (v_old -> 'purge_accounting_bytes')
+                                OR (v_new -> 'purge_attempted_at') IS DISTINCT FROM (v_old -> 'purge_attempted_at')
+                                OR (v_new -> 'purge_error') IS DISTINCT FROM (v_old -> 'purge_error')))) THEN
+      RAISE EXCEPTION 'The purge state of this image is server-owned and cannot be changed. Nothing was changed in the cloud.'
+        USING ERRCODE = 'P0001', HINT = 'sporely_purge_server_owned';
+    END IF;
+
+    -- A claimed row keeps the keys and owner its 'purge' record was computed
+    -- from, so the record's delete_keys always cover what the row names.
+    IF TG_OP = 'UPDATE' AND (v_old ->> 'purge_claimed_at') IS NOT NULL
+       AND ((v_new -> 'storage_path') IS DISTINCT FROM (v_old -> 'storage_path')
+            OR (v_new -> 'original_storage_path') IS DISTINCT FROM (v_old -> 'original_storage_path')
+            OR (v_new -> 'user_id') IS DISTINCT FROM (v_old -> 'user_id')) THEN
+      RAISE EXCEPTION 'This image was permanently removed; its media keys cannot be changed. Nothing was changed in the cloud.'
+        USING ERRCODE = 'P0001', HINT = 'sporely_purge_claimed';
+    END IF;
   END IF;
 
   -- Keys this write attaches: new or changed non-NULL keys; on a restore,
