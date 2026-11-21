@@ -813,10 +813,10 @@ failures as on main), §K fixture (42 cases), REST and concurrency (46 races) pa
   - `finalize_observation_image_purge` only marks the row purged and records the measured bytes
     (never `stored_bytes`); it no longer debits. Production check (read-only, 2026-11-21): no
     unpurged row carries a `purge_accounting_bytes` value, and the ledger has no unfinalized rows.
-  - Known limits, both in the safe direction (the user stays charged) and repaired by
+  - Known limit, in the safe direction (the user stays charged) and repaired by
     `recalculate_profile_storage_usage`: a tombstone whose primary object is already missing in R2
-    keeps its image count, and an admin-ops purge run by the old code against the new finalizer
-    would debit nothing.
+    keeps its image count. (main's admin-ops cannot reach the new finalizer: it never claims, and
+    the finalizer refuses an unclaimed row.)
 - 8 (fence race): accepted. In addition, delete-account reruns the stages from `media_snapshot`
   through `erase_media_retirements` once, after 2 s, when the erase refuses with
   `sporely_account_not_erasable`. Other erase errors do not rerun. The rerun forgets the first
