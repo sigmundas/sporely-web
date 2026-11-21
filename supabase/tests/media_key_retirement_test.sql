@@ -991,6 +991,7 @@ BEGIN
   PERFORM pg_temp.eq(pg_temp.run('postgres', NULL, format('INSERT INTO public.calibrations (user_id, objective_key, calibration_date, microns_per_pixel, image_storage_path) VALUES (%L, %L, current_date, 1, %L)', a, 'erx', a || '/c/x.webp')) LIKE 'ERR:23503:%', true, 'no row can carry the erased uid');
 END $$;
 
+SELECT pg_temp.eq((SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'observation_images_purge_retirement_id_idx'), 1::bigint, 'purge_retirement_id FK index');
 SELECT pg_temp.eq((SELECT string_agg(DISTINCT tgenabled::text, ',') FROM pg_trigger
                     WHERE tgname IN ('zzy_media_key_retirement_guard', 'media_key_retirements_immutable', 'media_key_retirements_no_truncate',
                                      'retired_media_key_roots_immutable', 'retired_media_key_roots_no_truncate')), 'A', 'triggers still ENABLE ALWAYS at the end');

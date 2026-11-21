@@ -1500,6 +1500,11 @@ CREATE INDEX spore_measurement_mosaics_storage_key_key_root_idx
 CREATE INDEX calibrations_image_storage_path_key_root_idx
   ON public.calibrations (private.media_key_root(image_storage_path))
   WHERE image_storage_path IS NOT NULL;
+-- Registry erasure deletes retirement records; the FK check on
+-- observation_images.purge_retirement_id must not scan the image table.
+CREATE INDEX observation_images_purge_retirement_id_idx
+  ON public.observation_images (purge_retirement_id)
+  WHERE purge_retirement_id IS NOT NULL;
 
 -- =============================================================
 -- 11. Obsolete-desktop brake: accept sync identity '2' or '3'.
