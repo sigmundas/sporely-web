@@ -84,6 +84,10 @@
 //                                   remove the user's media-key registry rows
 //                                   (allowed only once the account-deletion
 //                                   marker exists and no content rows remain).
+//                                   If a content row is still there (a write
+//                                   that passed the guard just before step 2
+//                                   committed), the run waits briefly and
+//                                   repeats steps 3-28 once.
 //  29. delete_profile            — profiles.id.
 //  30. delete_auth_user          — admin.auth.admin.deleteUser(uid). LAST so
 //                                   a failure in any earlier stage leaves
@@ -109,8 +113,9 @@
  *     deleteObjects: (objects: Array<{ bucket: string, key: string }>) => Promise<{ ok: boolean, error?: string }>,
  *     probeDelete: (prefix: string) => Promise<{ ok: boolean, error?: string }>,
  *   },
+ *   sleep?: (ms: number) => Promise<void>,
  * }} DeletionContext
- * @typedef {{ ok: true } | { ok: false, error: string }} StageResult
+ * @typedef {{ ok: true } | { ok: false, error: string, rerunContentStages?: boolean }} StageResult
  * @typedef {{ name: string, apply: (ctx: DeletionContext) => Promise<StageResult> }} Stage
  */
 
@@ -149,6 +154,13 @@ function assertSnapshotPageLimit(label, pages) {
 // four variants); serial calls would run far past the Edge Function time
 // limit. Bounded so the upload Worker and R2 are not flooded.
 export const R2_DELETE_CONCURRENCY = 16
+
+// erase_account_media_retirements refuses with this hint while content rows
+// remain; the run then repeats the stages from CONTENT_RERUN_FROM once,
+// after CONTENT_RERUN_DELAY_MS.
+export const ACCOUNT_NOT_ERASABLE_HINT = 'sporely_account_not_erasable'
+export const CONTENT_RERUN_FROM = 'media_snapshot'
+export const CONTENT_RERUN_DELAY_MS = 2000
 
 /**
  * Calls `fn` for every item with at most `limit` calls in flight. Resolves
@@ -536,10 +548,18 @@ export const STAGES = Object.freeze([
     name: 'erase_media_retirements',
     apply: async ctx => {
       try {
-        await requireSuccess(
-          'rpc erase_account_media_retirements',
-          ctx.admin.rpc('erase_account_media_retirements', { p_user_id: ctx.uid }),
-        )
+        const result = await ctx.admin.rpc('erase_account_media_retirements', { p_user_id: ctx.uid })
+        if (result?.error) {
+          return {
+            ok: false,
+            error: `rpc erase_account_media_retirements: ${result.error.message || 'unknown error'}`,
+            // A content row is left. The usual cause is a client write that
+            // passed the media-key guard just before begin_account_deletion
+            // committed; the fence refuses every later write, so one more
+            // pass of the content stages removes it.
+            rerunContentStages: result.error.hint === ACCOUNT_NOT_ERASABLE_HINT,
+          }
+        }
         return { ok: true }
       } catch (err) {
         return { ok: false, error: err.message }
@@ -653,14 +673,30 @@ async function listPrefix(ctx, prefix) {
  */
 export async function runDeletionPlan(ctx) {
   const completed = []
-  for (const stage of STAGES) {
+  let rerun = false
+  for (let index = 0; index < STAGES.length; index += 1) {
+    const stage = STAGES[index]
     const outcome = await stage.apply(ctx)
     if (!outcome.ok) {
+      // Finding 8: once per run, after a short wait for in-flight writes to
+      // commit, repeat every stage from the first snapshot through the
+      // erase. All of them are idempotent.
+      if (outcome.rerunContentStages && !rerun) {
+        rerun = true
+        await (ctx.sleep ?? defaultSleep)(CONTENT_RERUN_DELAY_MS)
+        index = STAGES.findIndex(s => s.name === CONTENT_RERUN_FROM) - 1
+        continue
+      }
       return { ok: false, stage: stage.name, error: outcome.error, completed }
     }
     completed.push(stage.name)
   }
   return { ok: true, completed }
+}
+
+
+function defaultSleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 // ── helpers ───────────────────────────────────────────────────────────

@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs'
 
 import {
   SNAPSHOT_PAGE_SIZE,
+  CONTENT_RERUN_DELAY_MS,
+  CONTENT_RERUN_FROM,
   R2_DELETE_CONCURRENCY,
   requireSuccess,
   runDeletionPlan,
@@ -952,16 +954,61 @@ test('registry erasure runs after the prefix is verified empty and before profil
   assert.deepEqual(admin._calls[erase].params, { p_user_id: UID })
 })
 
-test('an erasure refusal (content still present) stops before profile and auth deletion', async () => {
+const NOT_ERASABLE = { message: 'Media-key registry rows can be erased only ...', hint: 'sporely_account_not_erasable' }
+
+test('an erasure refusal (content still present) reruns the content stages once, then stops before profile and auth deletion', async () => {
   const admin = fakeAdmin({
     rpcResponses: {
-      erase_account_media_retirements: () => ({ data: null, error: { message: 'sporely_account_not_erasable' } }),
+      erase_account_media_retirements: () => ({ data: null, error: NOT_ERASABLE }),
     },
   })
-  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
+  const sleeps = []
+  const result = await runDeletionPlan({
+    uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT,
+    sleep: async ms => { sleeps.push(ms) },
+  })
   assert.equal(result.ok, false)
   assert.equal(result.stage, 'erase_media_retirements')
-  assert.equal(admin._calls.some(c => c.op === 'deleteUser'), false)
+  assert.deepEqual(sleeps, [CONTENT_RERUN_DELAY_MS])
+  assert.equal(admin._calls.filter(c => c.op === 'erase_account_media_retirements').length, 2)
+  assert.equal(admin._calls.some(c => c.op === 'deleteUser' || c.table === 'profiles'), false)
+})
+
+test('a late write left behind the fence is removed by the one content rerun', async () => {
+  let refusals = 1
+  const r2 = fakeR2({ legacy: [`${UID}/a.webp`] })
+  const admin = fakeAdmin({
+    rpcResponses: {
+      erase_account_media_retirements: () => {
+        if (refusals > 0) {
+          refusals -= 1
+          // The late upload lands while the run waits.
+          r2.buckets.private.add(`${UID}/late.webp`)
+          return { data: null, error: NOT_ERASABLE }
+        }
+        return { data: { status: 'erased' }, error: null }
+      },
+    },
+  })
+  let signOuts = 0
+  const result = await runDeletionPlan({
+    uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2,
+    signOutEverywhere: async () => { signOuts += 1; return { error: null } },
+    sleep: async () => {},
+  })
+  assert.equal(result.ok, true)
+  assert.equal(signOuts, 1)
+  assert.equal(admin._calls.filter(c => c.op === 'begin_account_deletion').length, 1)
+  assert.equal(admin._calls.filter(c => c.table === 'observation_images' && c.op === 'delete').length, 2)
+  assert.equal(admin._calls.filter(c => c.op === 'delete_reference_library_for_account').length, 2)
+  assert.deepEqual([...r2.buckets.legacy, ...r2.buckets.private], [])
+  // Every stage from the first snapshot ran twice; the earlier ones once.
+  const start = EXPECTED_ORDER.indexOf(CONTENT_RERUN_FROM)
+  const erase = EXPECTED_ORDER.indexOf('erase_media_retirements')
+  assert.deepEqual(result.completed, [
+    ...EXPECTED_ORDER.slice(0, erase),
+    ...EXPECTED_ORDER.slice(start),
+  ])
 })
 
 test('global sign-out runs before any erasure; a sign-out failure stops it', async () => {
@@ -994,6 +1041,8 @@ test('a rerun after a partial failure completes (already signed out, marker kept
   const first = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2, signOutEverywhere: SIGN_OUT })
   assert.equal(first.ok, false)
   assert.equal(first.stage, 'erase_media_retirements')
+  // Only the not-erasable refusal reruns the content stages.
+  assert.equal(admin._calls.filter(c => c.op === 'erase_account_media_retirements').length, 1)
   failErase = false
   const retry = await runDeletionPlan({
     uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2,
