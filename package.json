@@ -58,10 +58,10 @@
     "release:version:major": "npm version major --no-git-tag-version && npm run sync:version:bump-code"
   },
   "dependencies": {
-    "@capacitor/android": "^8.3.0",
+    "@capacitor/android": "^8.6.2",
     "@capacitor/app": "^8.1.0",
-    "@capacitor/cli": "^8.3.0",
-    "@capacitor/core": "^8.3.0",
+    "@capacitor/cli": "^8.6.2",
+    "@capacitor/core": "^8.6.2",
     "@capacitor/filesystem": "^8.1.2",
     "@capacitor/network": "^8.0.1",
     "@capacitor/preferences": "^8.0.1",
@@ -80,6 +80,6 @@
     "@vitejs/plugin-basic-ssl": "^2.3.0",
     "eslint": "^10.4.1",
     "globals": "^17.6.0",
-    "vite": "^6.3.2"
+    "vite": "^6.4.6"
   }
 }
