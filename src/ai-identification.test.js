@@ -723,6 +723,82 @@ test('formatting AI suggestions keeps vernacular and scientific names on separat
   assert.match(inatHtml, /inaturalist\.org\/taxa\/12345/)
 })
 
+test('species links only render https URLs on known provider hosts', () => {
+  const linkHref = (service, prediction) => {
+    const html = renderIdentifyResultRows(service, [{
+      vernacularName: 'knivkjuke',
+      scientificName: 'Piptoporus betulinus',
+      probability: 0.91,
+      ...prediction,
+    }])
+    const match = html.match(/class="ai-result-row-link[^"]*"\s+href="([^"]*)"/)
+    return match ? match[1] : null
+  }
+
+  const blocked = [
+    'javascript:alert(1)',
+    'https://localhost/_capacitor_http_interceptor_?u=https%3A%2F%2Fevil.example%2Fx.html',
+    'http://artsdatabanken.no/arter/takson/1',
+    'https://artsdatabanken.no.evil.example/arter/takson/1',
+    'https://evilartsdatabanken.no/arter/takson/1',
+    'https://user@artsdatabanken.no/arter/takson/1',
+    'https://artsdatabanken.no:8443/arter/takson/1',
+    'data:text/html,<script>alert(1)</script>',
+    '//artsdatabanken.no/arter/takson/1',
+  ]
+  for (const speciesUrl of blocked) {
+    assert.equal(linkHref('artsorakel', { speciesUrl }), null, speciesUrl)
+    assert.equal(linkHref('artsorakel', { species_url: speciesUrl }), null, speciesUrl)
+  }
+
+  assert.equal(
+    linkHref('artsorakel', { speciesUrl: 'https://artsdatabanken.no/arter/takson/47274' }),
+    'https://artsdatabanken.no/arter/takson/47274',
+  )
+  assert.equal(
+    linkHref('artsorakel', { speciesUrl: 'https://ai.artsdatabanken.no/taxon/47274' }),
+    'https://ai.artsdatabanken.no/taxon/47274',
+  )
+  assert.equal(
+    linkHref('inat', { speciesUrl: 'https://www.inaturalist.org/taxa/12345' }),
+    'https://www.inaturalist.org/taxa/12345',
+  )
+
+  // A rejected stored iNaturalist URL falls back to the taxon-id link.
+  assert.equal(
+    linkHref('inat', { taxonId: '12345', species_url: 'javascript:alert(1)' }),
+    'https://www.inaturalist.org/taxa/12345',
+  )
+
+  // These parse as absolute URLs but a browser resolves them against the
+  // page origin when used verbatim as an href, so the parsed form is rendered.
+  assert.equal(
+    linkHref('artsorakel', { speciesUrl: 'https:/artsdatabanken.no/arter/takson/1' }),
+    'https://artsdatabanken.no/arter/takson/1',
+  )
+  assert.equal(
+    linkHref('artsorakel', { speciesUrl: 'https:artsdatabanken.no' }),
+    'https://artsdatabanken.no/',
+  )
+})
+
+test('result rows keep the prediction JSON attribute intact when text contains entities', () => {
+  const scientificName = `Amanita "muscaria" &quot;x&quot; &amp; it's &lt;b&gt;`
+  const html = renderIdentifyResultRows('artsorakel', [{
+    vernacularName: 'fluesopp',
+    scientificName,
+    speciesUrl: 'https://artsdatabanken.no/arter/takson/1?a=1&b=&quot;2',
+    probability: 0.5,
+  }])
+  const match = html.match(/data-identify-result='([^']*)'/)
+  assert.ok(match, 'attribute is present and single-quote delimited')
+  // Decode the attribute the way an HTML parser does (one pass).
+  const entities = { '&amp;': '&', '&#39;': "'", '&quot;': '"', '&lt;': '<', '&gt;': '>' }
+  const decoded = match[1].replace(/&(?:amp|#39|quot|lt|gt);/g, entity => entities[entity])
+  const parsed = JSON.parse(decoded)
+  assert.equal(parsed.scientificName, scientificName)
+})
+
 test('service tabs render no-match, running, and success states with the right icon semantics', () => {
   const noMatch = renderIdentifyServiceTab({
     service: 'artsorakel',
