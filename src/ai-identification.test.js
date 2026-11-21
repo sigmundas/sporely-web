@@ -769,6 +769,34 @@ test('species links only render https URLs on known provider hosts', () => {
     linkHref('inat', { taxonId: '12345', species_url: 'javascript:alert(1)' }),
     'https://www.inaturalist.org/taxa/12345',
   )
+
+  // These parse as absolute URLs but a browser resolves them against the
+  // page origin when used verbatim as an href, so the parsed form is rendered.
+  assert.equal(
+    linkHref('artsorakel', { speciesUrl: 'https:/artsdatabanken.no/arter/takson/1' }),
+    'https://artsdatabanken.no/arter/takson/1',
+  )
+  assert.equal(
+    linkHref('artsorakel', { speciesUrl: 'https:artsdatabanken.no' }),
+    'https://artsdatabanken.no/',
+  )
+})
+
+test('result rows keep the prediction JSON attribute intact when text contains entities', () => {
+  const scientificName = `Amanita "muscaria" &quot;x&quot; &amp; it's &lt;b&gt;`
+  const html = renderIdentifyResultRows('artsorakel', [{
+    vernacularName: 'fluesopp',
+    scientificName,
+    speciesUrl: 'https://artsdatabanken.no/arter/takson/1?a=1&b=&quot;2',
+    probability: 0.5,
+  }])
+  const match = html.match(/data-identify-result='([^']*)'/)
+  assert.ok(match, 'attribute is present and single-quote delimited')
+  // Decode the attribute the way an HTML parser does (one pass).
+  const entities = { '&amp;': '&', '&#39;': "'", '&quot;': '"', '&lt;': '<', '&gt;': '>' }
+  const decoded = match[1].replace(/&(?:amp|#39|quot|lt|gt);/g, entity => entities[entity])
+  const parsed = JSON.parse(decoded)
+  assert.equal(parsed.scientificName, scientificName)
 })
 
 test('service tabs render no-match, running, and success states with the right icon semantics', () => {
