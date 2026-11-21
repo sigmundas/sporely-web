@@ -976,23 +976,29 @@ test('an erasure refusal (content still present) reruns the content stages once,
 
 test('a late write left behind the fence is removed by the one content rerun', async () => {
   let refusals = 1
+  let imageRows = [{ id: 1, storage_path: `${UID}/obs/first.webp` }]
   const r2 = fakeR2({ legacy: [`${UID}/a.webp`] })
   const admin = fakeAdmin({
+    tableResponses: {
+      observation_images: { select: () => ({ data: imageRows, error: null }) },
+    },
     rpcResponses: {
       erase_account_media_retirements: () => {
         if (refusals > 0) {
           refusals -= 1
-          // The late upload lands while the run waits.
-          r2.buckets.private.add(`${UID}/late.webp`)
+          // A late row and its upload land while the run waits.
+          imageRows = [{ id: 2, storage_path: `${UID}/obs/late.webp` }]
+          r2.buckets.private.add(`${UID}/obs/late.webp`)
           return { data: null, error: NOT_ERASABLE }
         }
         return { data: { status: 'erased' }, error: null }
       },
     },
   })
+  const worker = fakeWorker()
   let signOuts = 0
   const result = await runDeletionPlan({
-    uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2,
+    uid: UID, admin, worker, r2Keys: new Set(), r2,
     signOutEverywhere: async () => { signOuts += 1; return { error: null } },
     sleep: async () => {},
   })
@@ -1002,6 +1008,11 @@ test('a late write left behind the fence is removed by the one content rerun', a
   assert.equal(admin._calls.filter(c => c.table === 'observation_images' && c.op === 'delete').length, 2)
   assert.equal(admin._calls.filter(c => c.op === 'delete_reference_library_for_account').length, 2)
   assert.deepEqual([...r2.buckets.legacy, ...r2.buckets.private], [])
+  // The rerun sends Worker DELETEs only for the keys collected after the
+  // wait; the first pass's keys are not sent again.
+  const first = observationMediaDeleteTargets(`${UID}/obs/first.webp`)
+  const late = observationMediaDeleteTargets(`${UID}/obs/late.webp`)
+  assert.deepEqual(worker.deleted.slice().sort(), [...first, ...late].sort())
   // Every stage from the first snapshot ran twice; the earlier ones once.
   const start = EXPECTED_ORDER.indexOf(CONTENT_RERUN_FROM)
   const erase = EXPECTED_ORDER.indexOf('erase_media_retirements')

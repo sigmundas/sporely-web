@@ -683,6 +683,11 @@ export async function runDeletionPlan(ctx) {
       // erase. All of them are idempotent.
       if (outcome.rerunContentStages && !rerun) {
         rerun = true
+        // Every key the first pass collected was deleted (delete_r2_media
+        // succeeded, or the run would not have reached the erase). Forget
+        // them so the rerun sends Worker DELETEs only for keys of rows that
+        // appeared since; the prefix deletes still cover every object.
+        ctx.r2Keys.clear()
         await (ctx.sleep ?? defaultSleep)(CONTENT_RERUN_DELAY_MS)
         index = STAGES.findIndex(s => s.name === CONTENT_RERUN_FROM) - 1
         continue
