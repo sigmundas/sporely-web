@@ -495,7 +495,8 @@ BEGIN
   -- another object, and names whose derived variants would have another root.
   FOREACH v_bad IN ARRAY ARRAY[a || '/x/../f.webp', a || '/./f.webp', a || '/x/%2Ff.webp', a || '/x/%5cf.webp', a || E'/x/a\\b.webp',
                                a || E'/x/f.webp\t', a || E'/x/f\n.webp', a || '/x//f.webp', a || E'/x/f.webp ', a || E'/x/f.webp﻿',
-                               a || '/x/small_', a || '/x/thumb_small_', a || '/x/SMALL_f.webp', a || '/x/thumb_Small_f.webp'] LOOP
+                               a || '/x/small_', a || '/x/thumb_small_', a || '/x/SMALL_f.webp', a || '/x/thumb_Small_f.webp',
+                               a || '/x/f.webp /', a || '/x/ f.webp', ' ' || a || '/x/f.webp'] LOOP
     PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format('UPDATE public.observations SET image_key = %L WHERE id = %s', v_bad, pg_temp.fxi('att.obs'))), 'ERR:P0001:sporely_media_key_invalid', 'invalid key ' || v_bad);
     PERFORM pg_temp.eq(private.media_key_is_valid(v_bad), false, 'is_valid ' || v_bad);
     PERFORM pg_temp.eq(pg_temp.run('service_role', NULL, format('UPDATE public.observations SET image_key = %L WHERE id = %s', v_bad, pg_temp.fxi('att.obs'))), 'ERR:P0001:sporely_media_key_invalid', 'service_role invalid key ' || v_bad);
@@ -670,6 +671,21 @@ BEGIN
                          WHERE r.id = (v_res ->> 'retirement_id')::bigint), true, v_case || ' record holds the cleared key');
     PERFORM pg_temp.eq((SELECT row(image_key, thumb_key)::text FROM public.spore_measurements WHERE image_id = pg_temp.fxi(v_case || '.img')), row(NULL::text, NULL::text)::text, v_case || ' measurement keys cleared');
   END LOOP;
+END $$;
+
+-- Originals keep the desktop's source filename, case included: a prefix-like
+-- name is a valid standalone key there, and such an image can be released.
+DO $$
+DECLARE
+  a text := pg_temp.fx('A');
+  v_orig text := pg_temp.fx('A') || '/rorig/originals/1/SMALL_sample.jpg';
+  v_out text;
+BEGIN
+  PERFORM pg_temp.seed('rorig', 'A', a || '/rorig/f.webp');
+  PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format($q$UPDATE public.observation_images SET original_storage_path = %L WHERE id = %s RETURNING 'ok'$q$, v_orig, pg_temp.fxi('rorig.img'))), 'ok:ok', 'original with a prefix-like name accepted');
+  v_out := pg_temp.run('authenticated', a::uuid, format($q$SELECT public.release_observation_image_bytes(gen_random_uuid(), %s, %L, %L, 'owner_sync')$q$, pg_temp.fxi('rorig.img'), a || '/rorig/f.webp', v_orig));
+  PERFORM pg_temp.eq(substr(v_out, 4)::jsonb ->> 'status', 'released', 'release with that original ' || v_out);
+  PERFORM pg_temp.eq((substr(v_out, 4)::jsonb -> 'delete_keys') ? v_orig, true, 'original is deleted as itself');
 END $$;
 
 -- media_key_shared on a claim: a live row shares the tombstone's key.

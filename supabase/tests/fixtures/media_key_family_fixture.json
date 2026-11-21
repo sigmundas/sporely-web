@@ -20,7 +20,7 @@
       "preview_"
     ],
     "strip_while_longer_than_prefix": true,
-    "invalid": "a . or .. segment, ANY % (every percent encoding), a backslash, a control character, an empty segment (//), leading or trailing whitespace that JS trim removes, a filename made only of variant prefixes, or a variant prefix not spelled in lowercase; guard, release and claim refuse such keys",
+    "invalid": "a . or .. segment, ANY % (every percent encoding), a backslash, a control character, an empty segment (//), whitespace at the start or end of the key or of any segment, and outside originals/ a filename made only of variant prefixes or a variant prefix not spelled in lowercase; guard, release and claim refuse such keys",
     "family_sort": "C collation / code point"
   },
   "cases": [
@@ -396,7 +396,7 @@
     },
     {
       "key": " /u/o/f.webp/ ",
-      "valid": true,
+      "valid": false,
       "root": "u/o/f.webp",
       "family": [
         "u/o/cards_f.webp",
@@ -780,6 +780,56 @@
         "u/o/thumb_small_SMALL_f.webp",
         "u/o/thumb_small_thumb_SMALL_f.webp",
         "u/o/thumb_thumb_SMALL_f.webp"
+      ]
+    },
+    {
+      "key": "u/o/f.webp /",
+      "valid": false,
+      "root": "u/o/f.webp ",
+      "family": [
+        "u/o/cards_f.webp ",
+        "u/o/f.webp ",
+        "u/o/medium_f.webp ",
+        "u/o/preview_f.webp ",
+        "u/o/small_f.webp ",
+        "u/o/thumb_cards_f.webp ",
+        "u/o/thumb_f.webp ",
+        "u/o/thumb_medium_f.webp ",
+        "u/o/thumb_preview_f.webp ",
+        "u/o/thumb_small_f.webp "
+      ]
+    },
+    {
+      "key": "u/o/ f.webp",
+      "valid": false,
+      "root": "u/o/ f.webp",
+      "family": [
+        "u/o/ f.webp",
+        "u/o/cards_ f.webp",
+        "u/o/medium_ f.webp",
+        "u/o/preview_ f.webp",
+        "u/o/small_ f.webp",
+        "u/o/thumb_ f.webp",
+        "u/o/thumb_cards_ f.webp",
+        "u/o/thumb_medium_ f.webp",
+        "u/o/thumb_preview_ f.webp",
+        "u/o/thumb_small_ f.webp"
+      ]
+    },
+    {
+      "key": "u/originals/1/SMALL_sample.jpg",
+      "valid": true,
+      "root": "u/originals/1/SMALL_sample.jpg",
+      "family": [
+        "u/originals/1/SMALL_sample.jpg"
+      ]
+    },
+    {
+      "key": "u/originals/1/thumb_.jpg",
+      "valid": true,
+      "root": "u/originals/1/thumb_.jpg",
+      "family": [
+        "u/originals/1/thumb_.jpg"
       ]
     }
   ]

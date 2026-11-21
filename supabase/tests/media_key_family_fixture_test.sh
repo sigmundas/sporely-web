@@ -48,7 +48,9 @@ BEGIN
         END) THEN
       RAISE EXCEPTION 'root(%) disagrees with normalize + strip_variant_prefixes', v_key;
     END IF;
-    IF private.media_key_root(v_root) IS DISTINCT FROM v_root THEN
+    -- A fixed point for every VALID key (an invalid key such as 'f.webp /' is
+    -- refused before its root is ever stored or compared).
+    IF (c ->> 'valid')::boolean AND private.media_key_root(v_root) IS DISTINCT FROM v_root THEN
       RAISE EXCEPTION 'root is not a fixed point for %', v_key;
     END IF;
     IF v_root IS NOT NULL AND NOT (v_root = ANY (v_family)) THEN
