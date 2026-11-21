@@ -14,6 +14,7 @@
 // required values this returns undefined and the plan fails closed at
 // delete_r2_prefix (the account is not deleted).
 import { DeleteObjectsCommand, ListObjectsV2Command, S3Client } from 'npm:@aws-sdk/client-s3@3.1091.0'
+import { parsePrivateBucketSetting } from '../_shared/r2Buckets.ts'
 
 type R2Object = { bucket: string; key: string }
 
@@ -23,10 +24,9 @@ export function createPrefixR2Client(env: Record<string, string | undefined>) {
   const endpoint = String(env.R2_S3_ENDPOINT ?? '').trim().replace(/\/+$/, '')
   if (!accessKeyId || !secretAccessKey || !endpoint) return undefined
   const legacy = String(env.R2_BUCKET_NAME ?? '').trim() || 'sporely-media'
-  const privateSetting = String(env.R2_PRIVATE_BUCKET_NAME ?? '').trim()
-  if (!privateSetting) return undefined
-  const privateBucket = privateSetting.toLowerCase() === 'none' ? '' : privateSetting
-  const buckets = [...new Set([legacy, privateBucket].filter(Boolean))]
+  const privateSetting = parsePrivateBucketSetting(env.R2_PRIVATE_BUCKET_NAME)
+  if (!privateSetting.configured) return undefined
+  const buckets = [...new Set([legacy, privateSetting.bucket].filter((b): b is string => Boolean(b)))]
   const client = new S3Client({ region: 'auto', endpoint, credentials: { accessKeyId, secretAccessKey } })
 
   return {

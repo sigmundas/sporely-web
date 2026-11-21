@@ -1,5 +1,6 @@
 import {
   canonicalDeleteKeys,
+  createR2Client,
   attachMediaStorageBreakdown,
   buildImageIssueFlags,
   buildIssueSummary,
@@ -704,6 +705,16 @@ Deno.test('sweep: always-failing records do not stop later batches (the database
   assertEquals([result.counts.errors, result.counts.swept], [2, 1])
   const recordCall = admin.calls.find(c => c.startsWith('rpc:record_retired_key_sweep'))!
   assertEquals(JSON.parse(recordCall.split(':').slice(2).join(':')).p_retirement_ids, [40])
+})
+
+
+Deno.test('R2_PRIVATE_BUCKET_NAME=none means no private bucket (shared with delete-account)', () => {
+  const env = { R2_ACCESS_KEY_ID: 'k', R2_SECRET_ACCESS_KEY: 's', R2_S3_ENDPOINT: 'https://r2.example.invalid', R2_BUCKET_NAME: 'legacy' }
+  const buckets = (e: Record<string, string>) => createR2Client(e).clients.map(c => `${c.role}:${c.bucketName}`)
+  assertEquals(buckets({ ...env, R2_PRIVATE_BUCKET_NAME: 'none' }), ['legacy:legacy'])
+  assertEquals(buckets({ ...env, R2_PRIVATE_BUCKET_NAME: 'NONE' }), ['legacy:legacy'])
+  assertEquals(buckets({ ...env }), ['legacy:legacy'])
+  assertEquals(buckets({ ...env, R2_PRIVATE_BUCKET_NAME: 'private' }), ['legacy:legacy', 'private:private'])
 })
 
 Deno.test('canonicalDeleteKeys keeps stored keys verbatim and rejects any the R2 client would rewrite', () => {

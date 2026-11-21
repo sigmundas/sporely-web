@@ -1,4 +1,5 @@
 import { DeleteObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3'
+import { parsePrivateBucketSetting } from '../_shared/r2Buckets.ts'
 
 const DEFAULT_TOMBSTONE_RESTORE_WINDOW_DAYS = 30
 const PURGE_CANDIDATE_LIMIT = 500
@@ -1942,12 +1943,14 @@ async function safeCountRows(adminClient: any, table: string, applyFilter?: (que
   }
 }
 
-function createR2Client(env: Record<string, string | undefined>) {
+export function createR2Client(env: Record<string, string | undefined>) {
   const accessKeyId = normalizeText(env.R2_ACCESS_KEY_ID)
   const secretAccessKey = normalizeText(env.R2_SECRET_ACCESS_KEY)
   const s3Endpoint = normalizeText(env.R2_S3_ENDPOINT).replace(/\/+$/, '')
   const legacyBucketName = normalizeText(env.R2_BUCKET_NAME) || R2_BUCKET_NAME
-  const privateBucketName = normalizeText(env.R2_PRIVATE_BUCKET_NAME)
+  // Shared with delete-account: 'none' means the Worker binds no private
+  // bucket; unset keeps the legacy bucket only (as before).
+  const privateBucketName = parsePrivateBucketSetting(env.R2_PRIVATE_BUCKET_NAME).bucket ?? ''
 
   if (!accessKeyId || !secretAccessKey || !s3Endpoint) {
     throw actionError(500, 'missing_r2_configuration', 'R2 purge is not configured')
