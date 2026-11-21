@@ -667,3 +667,95 @@ Residual risks and open items:
 - A still-valid access token can upload through the Worker after `verify_r2_prefix_empty` and before
   the token expires. The 0b Worker fence and the orphan-prefix sweep above close it.
 - Admin-log retention and erasure policy (the inventory above): user decision.
+
+## Revival (2026-11-21): brought current with main; still not deployed
+
+Decision: still needed as designed. On main (7422e79) nothing replaces this design. Neither
+sporely-web nor sporely-py has any media-key retirement or cloud-copy anchor work after
+2026-10-20, and the desktop's `set_image_cloud_selected` still queues a tombstone for an
+uploaded microscope image. A read-only production check of obs 635 still shows 21 of 31 images
+tombstoned, 8 cloud measurements and no metadata-only anchors.
+
+Changes on the branch:
+- Merged `origin/main` (no rebase, no force-push). delete-account conflicts resolved: main's
+  keyset-paged snapshots, page-limit guard, legacy Storage offset fix and bounded-concurrency R2
+  deletes are kept, alongside this branch's sign-out, fence, prefix erasure and registry erasure.
+  The calibration snapshot is now keyset-paged too.
+- The migration is renumbered `20261020120000` → `20261120120000`: the old version belongs to
+  main's `admin_sync_health_detail`, which is applied in production. This file was never applied
+  remotely. `supabase migration list` before the change: only the deferred `20260914090000` is
+  local-only; remote head is `20261119130000`.
+- Re-checked against main's newer migrations. 20261118120000 (profiles/friendships) and
+  20261119130000 (comments) touch none of the five guarded tables and no function this migration
+  replaces. No newer migration writes a key column. Production's `private.sync_brake_guard` and
+  `private.admin_database_health_classify` bodies match 20261015090000 and 20261020100100 (md5 of
+  prosrc), the bodies this migration replaces. The desktop still sends identity 2; the Worker check
+  is unchanged.
+- main's `admin_sync_health_detail_test.sql` used unprefixed keys; it now uses owner-prefixed ones.
+- Break-check of every guard rule (remove the rule, run the tests, restore, md5 verified): four
+  rules had no failing test. New assertions now cover the nested-write fence, restore of a row whose
+  root is retired, claim of a live row, and insert-already-claimed. The two "claim columns
+  immutable" conditions cover each other; removing both is caught. ENABLE ALWAYS is caught.
+
+Local verification (isolated stack, Postgres image 17.6.1.084 as production):
+- SQL: 88 of 91 pass. The 3 failures (`public_observation_point_prep_test.sql`,
+  `public_observation_spore_previews_eval_count_test.sql`, `..._order_test.sql`) fail the same way
+  on a stack built from `origin/main`.
+- Note: the newer local image 17.6.1.106 (Supabase CLI default now) segfaults the backend in 8
+  tests on main as well (for example `admin_sync_health_detail_test.sql`). Pin
+  `supabase/.temp/postgres-version` to 17.6.1.084 for local test runs.
+- Shell: §K fixture (32 cases), REST, concurrency (46 races) pass. Node 1815 pass / 0 fail; Deno
+  admin-ops 37/37 and r2Prefix 5/5 (run from the function directory with admin-ops' deno.json).
+
+Deploy prerequisites are unchanged (rollout table and deploy prechecks above). With the new
+version, deploy via `node scripts/supabase-deploy-tree.mjs prepare --allow 20261120120000 ...`.
+
+### Codex challenge of the revived branch (2026-11-21, gpt-6.2-astra, HEAD 001d81d): NOT ready to deploy
+
+Each finding was checked against the code, on the local stack, and with read-only production
+queries. None is fixed yet; they need a user decision (deletion, accounting and erasure semantics).
+
+Confirmed:
+1. Noncanonical keys are accepted. `media_key_is_valid` allows tabs, newlines, leading or trailing
+   whitespace and empty segments (`//`). SQL `btrim` strips only spaces, while admin-ops
+   (`normalizeMediaKey`, JS trim) and the Worker (collapses `//`) normalize further. So a claim or
+   release of a tombstone keyed `<uid>/x/f.webp\t` can delete the live `<uid>/x/f.webp` (owner-scoped).
+   Production has 0 such keys. Mitigation: refuse control characters, surrounding whitespace and
+   empty segments in `media_key_is_valid` (and the fixture), and pass `delete_keys` to R2 verbatim.
+2. A family member can fall outside the retired roots. For the name `small_`, the Worker-derived
+   `thumb_` has its own root, so it is neither locked, reference-checked nor retired. Production has
+   0 prefix-only or mixed-case names. Mitigation: refuse release or claim when any `delete_keys`
+   root is not in the retired roots (or refuse prefix-only names).
+3. Release and claim clear owner measurement and cover keys by root, but `delete_keys` comes only
+   from the image paths. A same-root key outside the family (`thumb_thumb_f.webp`) is cleared but
+   never deleted, leaving orphan bytes. Production has 0. Mitigation: add the cleared keys to
+   `delete_keys`.
+5. The owner can clear `purged_at` and set `purge_accounting_bytes` on their own tombstone (verified
+   locally). The finalizer gates on `purged_at IS NULL` and debits `purge_accounting_bytes`, so this
+   gives a second debit or lowers the owner's quota usage. Partly pre-existing on main. Mitigation:
+   the guard refuses client changes to these server-owned columns.
+6. The sweep can delete released bytes before the desktop's Worker DELETE. That DELETE then finds
+   nothing and never decrements quota (release leaves accounting to the Worker, see above).
+   Mitigation: a sweep grace window (Q-r3-1), or accounting in the sweep.
+7. The owner can change `storage_path` on a claimed tombstone (verified locally). The new key is
+   neither retired nor deleted, and finalize still succeeds. Mitigation: the guard freezes key
+   columns once `purge_claimed_at` is set.
+8. The write fence reads the marker without a lock, so a writer that passed the guard before the
+   marker committed can commit afterwards. Bounded: `erase_media_retirements` then refuses and a
+   retry completes. Mitigation: a shared per-owner lock in the guard, or accept and document.
+9. A Worker PUT admitted before sign-out can land after `verify_r2_prefix_empty` (known residual
+   risk). Mitigation: deploy delete-account only together with the 0b Worker fence.
+11. After the prefix delete, delete-account still sends one Worker DELETE per snapshotted key, and a
+   timeout restarts all of them. Mitigation: skip keys under the verified `<uid>/` prefix.
+12. admin-ops treats `R2_PRIVATE_BUCKET_NAME=none` as a real bucket; delete-account treats it as
+   "no private bucket". delete-account validates R2 config only after sign-out and the fence.
+   Mitigation: one shared parser, validated before `sign_out_everywhere`.
+13. `observation_images.purge_retirement_id` (FK) has no index, so registry erasure scans the image
+   table once per record. Mitigation: a partial index WHERE purge_retirement_id IS NOT NULL.
+
+Plausible:
+4. 21 same-key copies remain in the legacy Storage bucket `observation-images`; none belongs to a
+   live microscope image, which is the only kind release accepts. Purge deletes only R2 (as on main).
+   To settle: are any of the 21 tombstones that a purge would claim?
+10. Prefix erasure versus foreign-prefix legacy rows: production precheck 2 is 0 in all eight
+   columns, so it does not apply today. Keep precheck 2 a strict zero gate (drop "accepted rows").
