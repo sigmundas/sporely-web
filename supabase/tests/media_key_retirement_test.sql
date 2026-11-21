@@ -157,6 +157,7 @@ BEGIN
     ('private.media_key_registry_immutable()', 'postgres'),
     ('private.media_key_references(text[])', 'postgres'),
     ('private.media_key_owner_references(text[],uuid)', 'postgres'),
+    ('private.media_key_cleared_keys(bigint,uuid,bigint,text[])', 'postgres'),
     ('private.media_key_is_valid(text)', 'postgres'),
     ('private.media_key_registry_erasable(uuid)', 'postgres'),
     ('private.erase_account_media_retirements_core(uuid)', 'postgres'),
@@ -623,6 +624,39 @@ BEGIN
   PERFORM pg_temp.eq(v_res ->> 'status', 'claimed', 'measured tombstone claims');
   PERFORM pg_temp.eq((SELECT row(image_key, thumb_key)::text FROM public.spore_measurements WHERE id = v_m), row(NULL::text, NULL::text)::text, 'claim cleared measurement keys');
   PERFORM pg_temp.eq((SELECT row(image_key, thumb_key)::text FROM public.observations WHERE id = pg_temp.fxi('pgm.obs')), row(NULL::text, NULL::text)::text, 'claim cleared cover');
+END $$;
+
+-- Keys a release or claim clears (same root, outside the image family) are
+-- deleted too: they are in delete_keys and in the stored record.
+DO $$
+DECLARE
+  a text := pg_temp.fx('A');
+  v_out text;
+  v_res jsonb;
+  v_case text;
+BEGIN
+  FOREACH v_case IN ARRAY ARRAY['rtt', 'ctt'] LOOP
+    IF v_case = 'rtt' THEN
+      PERFORM pg_temp.seed(v_case, 'A', a || '/' || v_case || '/f.webp');
+    ELSE
+      PERFORM pg_temp.seed(v_case, 'A', a || '/' || v_case || '/f.webp', NULL, 'microscope', 40);
+    END IF;
+    INSERT INTO public.spore_measurements (image_id, user_id, length_um, image_key, thumb_key)
+    VALUES (pg_temp.fxi(v_case || '.img'), a::uuid, 3, a || '/' || v_case || '/f.webp', a || '/' || v_case || '/thumb_thumb_f.webp');
+    UPDATE public.observations SET thumb_key = a || '/' || v_case || '/thumb_small_thumb_f.webp' WHERE id = pg_temp.fxi(v_case || '.obs');
+    IF v_case = 'rtt' THEN
+      v_out := pg_temp.run('authenticated', a::uuid, format($q$SELECT public.release_observation_image_bytes(gen_random_uuid(), %s, %L, NULL, 'owner_sync')$q$, pg_temp.fxi('rtt.img'), a || '/rtt/f.webp'));
+    ELSE
+      v_out := pg_temp.run('service_role', NULL, format('SELECT public.claim_tombstoned_image_purge(gen_random_uuid(), %s)', pg_temp.fxi('ctt.img')));
+    END IF;
+    v_res := substr(v_out, 4)::jsonb;
+    PERFORM pg_temp.eq(v_res ->> 'status', CASE v_case WHEN 'rtt' THEN 'released' ELSE 'claimed' END, v_case || ' ' || v_out);
+    PERFORM pg_temp.eq((v_res -> 'delete_keys') ? (a || '/' || v_case || '/thumb_thumb_f.webp'), true, v_case || ' cleared measurement key deleted');
+    PERFORM pg_temp.eq((v_res -> 'delete_keys') ? (a || '/' || v_case || '/thumb_small_thumb_f.webp'), true, v_case || ' cleared cover key deleted');
+    PERFORM pg_temp.eq((SELECT (a || '/' || v_case || '/thumb_thumb_f.webp') = ANY (r.delete_keys) FROM private.media_key_retirements r
+                         WHERE r.id = (v_res ->> 'retirement_id')::bigint), true, v_case || ' record holds the cleared key');
+    PERFORM pg_temp.eq((SELECT row(image_key, thumb_key)::text FROM public.spore_measurements WHERE image_id = pg_temp.fxi(v_case || '.img')), row(NULL::text, NULL::text)::text, v_case || ' measurement keys cleared');
+  END LOOP;
 END $$;
 
 -- media_key_shared on a claim: a live row shares the tombstone's key.

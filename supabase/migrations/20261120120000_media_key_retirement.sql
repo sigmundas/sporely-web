@@ -438,6 +438,31 @@ AS $$
      AND private.media_key_root(c.image_storage_path) = ANY (p_roots)
 $$;
 
+-- The owner keys a release or claim clears: the owner's measurement keys of
+-- the image and the owning observation's cover keys whose root is one of
+-- p_roots. They go into delete_keys with the image family, so a same-root
+-- key outside the family (e.g. thumb_thumb_f) is deleted, not orphaned.
+CREATE FUNCTION private.media_key_cleared_keys(p_image_id bigint, p_owner uuid, p_obs_id bigint, p_roots text[])
+RETURNS text[]
+LANGUAGE sql
+STABLE
+SET search_path = ''
+AS $$
+  SELECT coalesce(pg_catalog.array_agg(DISTINCT s.n), ARRAY[]::text[])
+    FROM (
+      SELECT private.media_key_normalize(k) AS n
+        FROM public.spore_measurements m, pg_catalog.unnest(ARRAY[m.image_key, m.thumb_key]) AS k
+       WHERE m.image_id = p_image_id AND m.user_id = p_owner
+         AND private.media_key_root(k) = ANY (p_roots)
+      UNION ALL
+      SELECT private.media_key_normalize(k)
+        FROM public.observations o, pg_catalog.unnest(ARRAY[o.image_key, o.thumb_key]) AS k
+       WHERE o.id = p_obs_id AND o.user_id = p_owner
+         AND private.media_key_root(k) = ANY (p_roots)
+    ) s
+   WHERE s.n IS NOT NULL
+$$;
+
 -- References that can block p_owner's release, claim or sweep: EVERY row of
 -- p_owner, whatever the key's prefix (a legacy key outside '<uid>/' still
 -- counts), and any other owner's legacy row whose key is outside its own
@@ -808,9 +833,17 @@ BEGIN
     SELECT DISTINCT f COLLATE "C"
       FROM pg_catalog.unnest(
              private.media_key_family(v_img.storage_path)
-             || private.media_key_family(v_img.original_storage_path)) AS f
+             || private.media_key_family(v_img.original_storage_path)
+             || private.media_key_cleared_keys(p_image_id, v_img.user_id, v_obs_id, v_roots)) AS f
      ORDER BY 1
   );
+  -- Every key handed out for deletion must be valid and have a root this
+  -- transaction locked, reference-checked and retires.
+  IF EXISTS (SELECT 1 FROM pg_catalog.unnest(v_keys) AS k
+              WHERE NOT private.media_key_is_valid(k)
+                 OR NOT (private.media_key_root(k) = ANY (v_roots))) THEN
+    RETURN pg_catalog.jsonb_build_object('status', 'key_invalid', 'image_id', p_image_id);
+  END IF;
 
   INSERT INTO private.media_key_retirements (user_id, image_id, reason, operation_id, delete_keys)
   VALUES (v_img.user_id, p_image_id, 'release', p_release_id, v_keys)
@@ -961,9 +994,17 @@ BEGIN
     SELECT DISTINCT f COLLATE "C"
       FROM pg_catalog.unnest(
              private.media_key_family(v_img.storage_path)
-             || private.media_key_family(v_img.original_storage_path)) AS f
+             || private.media_key_family(v_img.original_storage_path)
+             || private.media_key_cleared_keys(p_image_id, v_img.user_id, v_obs_id, v_roots)) AS f
      ORDER BY 1
   );
+  -- Every key handed out for deletion must be valid and have a root this
+  -- transaction locked, reference-checked and retires.
+  IF EXISTS (SELECT 1 FROM pg_catalog.unnest(v_keys) AS k
+              WHERE NOT private.media_key_is_valid(k)
+                 OR NOT (private.media_key_root(k) = ANY (v_roots))) THEN
+    RETURN pg_catalog.jsonb_build_object('status', 'key_invalid', 'image_id', p_image_id);
+  END IF;
 
   -- The record first, then the row (the guard checks the link).
   INSERT INTO private.media_key_retirements (user_id, image_id, reason, operation_id, delete_keys)
@@ -1359,6 +1400,7 @@ REVOKE EXECUTE ON FUNCTION
   private.media_key_registry_immutable(),
   private.media_key_references(text[]),
   private.media_key_owner_references(text[], uuid),
+  private.media_key_cleared_keys(bigint, uuid, bigint, text[]),
   private.media_key_is_valid(text),
   private.media_key_retirement_guard(),
   private.media_key_retirement_replay(uuid, uuid, bigint, text),
