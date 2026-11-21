@@ -543,6 +543,12 @@ Open for review / next stages:
    observation's cover (run after deploying the functions, or as the equivalent join).
 4. The eight `CREATE INDEX` statements are not CONCURRENTLY: writes to the five tables block
    while they build inside the migration transaction. Check table sizes and pick a quiet window.
+5. **Gate (2026-11-21).** Unfinished purges by main's admin-ops:
+   `count(*) FROM observation_images WHERE purged_at IS NULL AND purge_accounting_bytes IS NOT NULL`
+   must be 0, with `ADMIN_TOMBSTONE_PURGE_ENABLED` off from this check until the deploy. Such a row
+   had bytes deleted before the ledger existed; the new code debits only what is still in R2 or in
+   the ledger, so those bytes would stay charged. Any row found is listed and settled with
+   `recalculate_profile_storage_usage` for its owner after the deploy. (0 on 2026-11-21.)
 
 ### Open items (need a user decision)
 
@@ -813,14 +819,33 @@ failures as on main), §K fixture (42 cases), REST and concurrency (46 races) pa
   - `finalize_observation_image_purge` only marks the row purged and records the measured bytes
     (never `stored_bytes`); it no longer debits. Production check (read-only, 2026-11-21): no
     unpurged row carries a `purge_accounting_bytes` value, and the ledger has no unfinalized rows.
-  - Known limit, in the safe direction (the user stays charged) and repaired by
-    `recalculate_profile_storage_usage`: a tombstone whose primary object is already missing in R2
-    keeps its image count. (main's admin-ops cannot reach the new finalizer: it never claims, and
-    the finalizer refuses an unclaimed row.)
+  - A finalized entry of a retired key is re-opened only if it was finalized before the key's
+    retirement (the key may have been uploaded again while live); the retirement time is read with
+    a fresh snapshot. `purge_accounting_bytes` records the ledger's sum for the record's keys.
+  - Known limits:
+    - Safe direction (the user stays charged; `recalculate_profile_storage_usage` repairs it): a
+      tombstone whose primary object is already missing in R2 keeps its image count. If admin-ops
+      runs with `R2_PRIVATE_BUCKET_NAME=none` while the Worker has a private bucket, a private-only
+      object is finalized at 0 bytes and a later Worker DELETE of it debits nothing. main's
+      admin-ops cannot reach the new finalizer: it never claims, and the finalizer refuses an
+      unclaimed row.
+    - Possible double debit, both needing two Worker requests on the same key (a race main already
+      has): two Worker DELETEs that both measured the object, the first finalizing before a
+      retirement of the key starts; and a Worker upload whose `canonical_bucket` PATCH fails after a
+      purge or release deleted and debited its object (the upload's rollback refunds directly).
+      Stage 0b's Worker retirement check before and after the write closes the second.
+    - Image count depends on who deletes first for a `small_`/`medium_`/`cards_`/`preview_` key:
+      the Worker counts such a key as an image (upload and delete), admin-ops never does. When
+      admin-ops is first the image stays charged (safe direction); when the Worker is first its own
+      rule applies, as on main.
 - 8 (fence race): accepted. In addition, delete-account reruns the stages from `media_snapshot`
   through `erase_media_retirements` once, after 2 s, when the erase refuses with
   `sporely_account_not_erasable`. Other erase errors do not rerun. The rerun forgets the first
-  pass's keys, so it sends Worker DELETEs only for rows that appeared since.
+  pass's keys, so it sends Worker DELETEs only for rows that appeared since. Accepted gap: if
+  `R2_PRIVATE_BUCKET_NAME` wrongly says `none` and a delayed write recreates a first-pass key in the
+  private bucket, the rerun no longer sends that key to the Worker, and the prefix passes cannot
+  see the private bucket. Both faults are needed; the configuration check before the sign-out is
+  the place to catch the first.
 - 9 (late Worker PUT after the empty check): not on this branch; Stage 0b Worker work.
   - The Worker checks the account-deletion marker before the write and again right after the R2
     put, and deletes what it just wrote if the marker exists by then. A write that lands before the
