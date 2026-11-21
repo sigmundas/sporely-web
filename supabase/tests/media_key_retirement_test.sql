@@ -91,6 +91,17 @@ CREATE FUNCTION pg_temp.status(p_out text) RETURNS text LANGUAGE sql AS $$
   SELECT CASE WHEN p_out LIKE 'ok:{%' THEN (substr(p_out, 4)::jsonb ->> 'status') ELSE p_out END
 $$;
 
+-- Inserting a statement into mkr_nested runs it from an AFTER INSERT
+-- trigger, so the writes it makes reach the guard at pg_trigger_depth() = 2.
+CREATE TEMP TABLE mkr_nested (stmt text) ON COMMIT DROP;
+CREATE FUNCTION pg_temp.mkr_nested_exec() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  EXECUTE NEW.stmt;
+  RETURN NULL;
+END $$;
+CREATE TRIGGER mkr_nested_exec AFTER INSERT ON mkr_nested
+  FOR EACH ROW EXECUTE FUNCTION pg_temp.mkr_nested_exec();
+
 -- ---------------------------------------------------------------
 -- Fixtures.
 -- ---------------------------------------------------------------
@@ -622,6 +633,40 @@ BEGIN
   PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format($q$UPDATE public.observation_images SET deleted_at = NULL WHERE id = %s RETURNING 'restored'$q$, pg_temp.fxi('pgsh.img'))), 'ok:restored', 'ordinary restore');
 END $$;
 
+-- Guard rules a valid-looking purge link cannot get around. The registry
+-- rows are planted directly (owner, inside this rolled-back transaction) so
+-- each rule is the only thing that refuses the write.
+DO $$
+DECLARE
+  a text := pg_temp.fx('A');
+  k text := pg_temp.fx('A') || '/prr/x.webp';
+  v_ret bigint;
+  v_id bigint;
+BEGIN
+  -- A restore attaches every key the row carries: refused when one of its
+  -- roots is retired, although the restore changes no key column.
+  PERFORM pg_temp.seed('prr', 'A', k, NULL, 'microscope', 40);
+  INSERT INTO private.media_key_retirements (user_id, image_id, reason, operation_id, delete_keys)
+  VALUES (a::uuid, -2, 'release', gen_random_uuid(), ARRAY[k]) RETURNING id INTO v_ret;
+  INSERT INTO private.retired_media_key_roots (user_id, key_root, retirement_id) VALUES (a::uuid, private.media_key_root(k), v_ret);
+  PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format('UPDATE public.observation_images SET deleted_at = NULL WHERE id = %s', pg_temp.fxi('prr.img'))), 'ERR:P0001:sporely_media_key_released', 'restore of a row whose key root is retired');
+
+  -- A claim needs a tombstoned row, even with a matching 'purge' record.
+  PERFORM pg_temp.seed('pcl', 'A', a || '/pcl/live.webp');
+  INSERT INTO private.media_key_retirements (user_id, image_id, reason, operation_id, delete_keys)
+  VALUES (a::uuid, pg_temp.fxi('pcl.img'), 'purge', gen_random_uuid(), ARRAY[]::text[]) RETURNING id INTO v_ret;
+  PERFORM pg_temp.eq(pg_temp.run('service_role', NULL, format('UPDATE public.observation_images SET purge_claimed_at = now(), purge_retirement_id = %s WHERE id = %s', v_ret, pg_temp.fxi('pcl.img'))), 'ERR:P0001:sporely_purge_claimed', 'claim of a live row with a matching purge record');
+
+  -- No row is ever inserted already claimed, even with an id and a 'purge'
+  -- record that match.
+  v_id := nextval('public.observation_images_id_seq');
+  INSERT INTO private.media_key_retirements (user_id, image_id, reason, operation_id, delete_keys)
+  VALUES (a::uuid, v_id, 'purge', gen_random_uuid(), ARRAY[]::text[]) RETURNING id INTO v_ret;
+  PERFORM pg_temp.eq(pg_temp.run('service_role', NULL, format(
+    'INSERT INTO public.observation_images (id, observation_id, user_id, image_type, deleted_at, purge_claimed_at, purge_retirement_id) OVERRIDING SYSTEM VALUE VALUES (%s, %s, %L, %L, now(), now(), %s)',
+    v_id, pg_temp.fxi('pcl.obs'), a, 'microscope', v_ret)), 'ERR:P0001:sporely_purge_claimed', 'INSERT already claimed with a matching purge record');
+END $$;
+
 -- ---------------------------------------------------------------
 -- 7. Sweep, interrupted purge, finalize, media_key_is_retired.
 -- ---------------------------------------------------------------
@@ -845,6 +890,13 @@ BEGIN
   PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format($q$UPDATE public.observations SET notes = 'late' WHERE id = %s$q$, pg_temp.fxi('att.obs'))), 'ERR:P0001:sporely_account_deleting', 'authenticated write fenced');
   PERFORM pg_temp.eq(pg_temp.run('service_role', NULL, format($q$INSERT INTO public.calibrations (user_id, objective_key, calibration_date, microns_per_pixel) VALUES (%L, 'fence', current_date, 1)$q$, a)), 'ERR:P0001:sporely_account_deleting', 'service_role write fenced');
   PERFORM pg_temp.eq(pg_temp.run('authenticated', a::uuid, format($q$SELECT public.release_observation_image_bytes(gen_random_uuid(), %s, %L, NULL, 'owner_sync')$q$, pg_temp.fxi('att.img'), a || '/att/live.webp')), 'ERR:P0001:sporely_account_deleting', 'release fenced');
+  -- Writes nested in another trigger (pg_trigger_depth() > 1) pass the fence
+  -- only when key-neutral. mkr_nested runs each inserted statement from an
+  -- AFTER INSERT trigger, so the guard sees depth 2.
+  PERFORM pg_temp.eq(pg_temp.run('postgres', NULL, format('INSERT INTO mkr_nested VALUES (%L)', format('UPDATE public.observation_images SET storage_path = %L WHERE id = %s', a || '/nested/x.webp', pg_temp.fxi('att.img')))), 'ERR:P0001:sporely_account_deleting', 'nested key change fenced');
+  PERFORM pg_temp.eq(pg_temp.run('postgres', NULL, format('INSERT INTO mkr_nested VALUES (%L)', format($q$INSERT INTO public.calibrations (user_id, objective_key, calibration_date, microns_per_pixel) VALUES (%L, 'nested', current_date, 1)$q$, a))), 'ERR:P0001:sporely_account_deleting', 'nested INSERT fenced');
+  PERFORM pg_temp.eq(pg_temp.run('postgres', NULL, format($q$INSERT INTO mkr_nested VALUES (%L) RETURNING 'passed'$q$, format($q$UPDATE public.observations SET notes = 'nested' WHERE id = %s$q$, pg_temp.fxi('att.obs')))), 'ok:passed', 'nested key-neutral update passes');
+  PERFORM pg_temp.eq((SELECT notes FROM public.observations WHERE id = pg_temp.fxi('att.obs')), 'nested', 'nested key-neutral update applied');
   PERFORM pg_temp.eq(pg_temp.run('service_role', NULL, format('SELECT public.erase_account_media_retirements(%L)', a)), 'ERR:P0001:sporely_account_not_erasable', 'erase refused while content remains');
   PERFORM pg_temp.eq(pg_temp.run('postgres', NULL, format('DELETE FROM private.media_key_retirements WHERE user_id = %L', a)), 'ERR:P0001:sporely_media_key_registry_immutable', 'direct delete refused while content remains');
 
