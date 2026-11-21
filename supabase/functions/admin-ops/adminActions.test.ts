@@ -19,6 +19,7 @@ import {
   TOMBSTONE_PURGE_DISABLED,
   MediaStorageBreakdown,
   R2MultiBucketClient,
+  isPrimaryMediaKey,
 } from './adminActions.ts'
 
 function assertEquals(actual: unknown, expected: unknown) {
@@ -568,6 +569,7 @@ function fakeR2(options: { fail?: boolean } = {}) {
 }
 
 const ENABLED = { ADMIN_TOMBSTONE_PURGE_ENABLED: 'true' }
+const SWEEP_UID = '00000000-0000-4000-8000-0000000000aa'
 const PURGE_ROW = { id: 8, status: 'eligible', delete_targets: ['user/b.webp', 'user/thumb_b.webp'] }
 
 Deno.test('claim-aware purge: deletes exactly the keys the claim returns, then finalizes', async () => {
@@ -630,9 +632,9 @@ Deno.test('rpc retry: 40P01 / 55P03 retried up to 3 attempts, other errors not r
 Deno.test('sweep: deletes stored keys, finalizes purges, reports guard failures, records only finished rows', async () => {
   const admin = fakeAdmin({
     claim_retired_key_sweep: [{ data: [
-      { retirement_id: 1, image_id: 10, reason: 'release', status: 'ok', delete_keys: ['u/a.webp', 'u/thumb_a.webp'] },
-      { retirement_id: 2, image_id: 11, reason: 'purge', status: 'ok', delete_keys: ['u/p.webp'] },
-      { retirement_id: 3, image_id: 12, reason: 'release', status: 'guard_failed', delete_keys: ['u/g.webp'], blocking_references: [{ table: 'observations' }] },
+      { retirement_id: 1, user_id: SWEEP_UID, image_id: 10, reason: 'release', status: 'ok', delete_keys: ['u/a.webp', 'u/thumb_a.webp'] },
+      { retirement_id: 2, user_id: SWEEP_UID, image_id: 11, reason: 'purge', status: 'ok', delete_keys: ['u/p.webp'] },
+      { retirement_id: 3, user_id: SWEEP_UID, image_id: 12, reason: 'release', status: 'guard_failed', delete_keys: ['u/g.webp'], blocking_references: [{ table: 'observations' }] },
     ], error: null }],
     finalize_observation_image_purge: [{ data: [{ quota_changed: true }], error: null }],
     record_retired_key_sweep: [{ data: 3, error: null }],
@@ -647,7 +649,7 @@ Deno.test('sweep: deletes stored keys, finalizes purges, reports guard failures,
 
 Deno.test('sweep: an R2 failure leaves the record unrecorded for the next sweep', async () => {
   const admin = fakeAdmin({
-    claim_retired_key_sweep: [{ data: [{ retirement_id: 9, image_id: 1, reason: 'release', status: 'ok', delete_keys: ['u/x.webp'] }], error: null }],
+    claim_retired_key_sweep: [{ data: [{ retirement_id: 9, user_id: SWEEP_UID, image_id: 1, reason: 'release', status: 'ok', delete_keys: ['u/x.webp'] }], error: null }],
     record_retired_key_sweep: [{ data: 0, error: null }],
   })
   const result: any = await runRetiredKeySweep({ adminClient: admin.client, env: ENABLED }, { limit: 50, batches: 1 }, async () => ({ ok: true, client: fakeR2({ fail: true }) as any }))
@@ -671,8 +673,8 @@ Deno.test('sweep: refused while purge is disabled', async () => {
 Deno.test('sweep: a purge whose image row is gone or already purged is deleted and recorded without finalize', async () => {
   const admin = fakeAdmin({
     claim_retired_key_sweep: [{ data: [
-      { retirement_id: 21, image_id: 1, reason: 'purge', status: 'ok', delete_keys: ['u/gone.webp'], image_exists: false, image_purged_at: null },
-      { retirement_id: 22, image_id: 2, reason: 'purge', status: 'ok', delete_keys: ['u/done.webp'], image_exists: true, image_purged_at: '2026-10-01T00:00:00Z' },
+      { retirement_id: 21, user_id: SWEEP_UID, image_id: 1, reason: 'purge', status: 'ok', delete_keys: ['u/gone.webp'], image_exists: false, image_purged_at: null },
+      { retirement_id: 22, user_id: SWEEP_UID, image_id: 2, reason: 'purge', status: 'ok', delete_keys: ['u/done.webp'], image_exists: true, image_purged_at: '2026-10-01T00:00:00Z' },
     ], error: null }],
     record_retired_key_sweep: [{ data: 2, error: null }],
   })
@@ -686,11 +688,11 @@ Deno.test('sweep: a purge whose image row is gone or already purged is deleted a
 })
 
 Deno.test('sweep: always-failing records do not stop later batches (the database rotates them)', async () => {
-  const failing = Array.from({ length: 2 }, (_, i) => ({ retirement_id: 30 + i, image_id: 1, reason: 'release', status: 'ok', delete_keys: [`u/fail${i}.webp`] }))
+  const failing = Array.from({ length: 2 }, (_, i) => ({ retirement_id: 30 + i, user_id: SWEEP_UID, image_id: 1, reason: 'release', status: 'ok', delete_keys: [`u/fail${i}.webp`] }))
   const admin = fakeAdmin({
     claim_retired_key_sweep: [
       { data: failing, error: null },
-      { data: [{ retirement_id: 40, image_id: 2, reason: 'release', status: 'ok', delete_keys: ['u/new.webp'] }], error: null },
+      { data: [{ retirement_id: 40, user_id: SWEEP_UID, image_id: 2, reason: 'release', status: 'ok', delete_keys: ['u/new.webp'] }], error: null },
     ],
     record_retired_key_sweep: [{ data: 1, error: null }],
   })
@@ -735,7 +737,7 @@ Deno.test('claim-aware purge: a noncanonical claimed key deletes nothing and rec
 
 Deno.test('sweep: a record with a noncanonical key is reported as guard_failed, not deleted', async () => {
   const admin = fakeAdmin({
-    claim_retired_key_sweep: [{ data: [{ retirement_id: 4, image_id: 2, reason: 'release', status: 'ok', delete_keys: ['u/x.webp', ' u/y.webp'] }], error: null }],
+    claim_retired_key_sweep: [{ data: [{ retirement_id: 4, user_id: SWEEP_UID, image_id: 2, reason: 'release', status: 'ok', delete_keys: ['u/x.webp', ' u/y.webp'] }], error: null }],
     record_retired_key_sweep: [{ data: 1, error: null }],
   })
   const r2 = fakeR2()
@@ -743,6 +745,122 @@ Deno.test('sweep: a record with a noncanonical key is reported as guard_failed, 
   assertEquals(r2.deleted, [])
   assertEquals(result.counts, { swept: 0, guard_failed: 1, errors: 0, finalized: 0 })
   assertEquals(result.rows[0].blocking_references, [{ reason: 'noncanonical_delete_key', count: 1 }])
+})
+
+
+// --- Finding 6: the sweep debits raw key deletes through the Worker ledger ---
+
+function ledgerCalls(calls: string[]) {
+  return calls
+    .filter(c => c.startsWith('rpc:prepare_media_object_deletion') || c.startsWith('rpc:finalize_media_object_deletion'))
+    .map(c => {
+      const [, name] = c.split(':')
+      const args = JSON.parse(c.split(':').slice(2).join(':'))
+      return name === 'prepare_media_object_deletion'
+        ? `prepare ${args.p_storage_key} ${args.p_storage_bytes} ${args.p_image_count}`
+        : `finalize ${args.p_storage_key}`
+    })
+}
+
+const U = SWEEP_UID
+
+Deno.test('sweep ledger: a release debits each measured key once through the Worker ledger, one image at most', async () => {
+  const keys = [`${U}/o/cards_a.webp`, `${U}/o/a.webp`, `${U}/o/small_a.webp`, `${U}/o/thumb_a.webp`, `${U}/o/thumb_small_a.webp`]
+  const legacy = fakeBucket('legacy', { [`${U}/o/a.webp`]: 100, [`${U}/o/thumb_a.webp`]: 10 })
+  const priv = fakeBucket('private', { [`${U}/o/a.webp`]: 100, [`${U}/o/small_a.webp`]: 30, [`${U}/o/cards_a.webp`]: 5 })
+  const client = new R2MultiBucketClient([legacy, priv] as never)
+  const admin = fakeAdmin({
+    claim_retired_key_sweep: [{ data: [{ retirement_id: 50, user_id: U, image_id: 1, reason: 'release', status: 'ok', delete_keys: keys }], error: null }],
+    prepare_media_object_deletion: [{ data: null, error: null }],
+    finalize_media_object_deletion: [{ data: [{}], error: null }],
+    record_retired_key_sweep: [{ data: 1, error: null }],
+  })
+  const result: any = await runRetiredKeySweep({ adminClient: admin.client, env: ENABLED }, { limit: 50, batches: 1 }, async () => ({ ok: true, client: client as any }))
+  assertEquals(result.counts, { swept: 1, guard_failed: 0, errors: 0, finalized: 0 })
+  assertEquals(ledgerCalls(admin.calls), [
+    `prepare ${U}/o/a.webp 100 1`, `finalize ${U}/o/a.webp`,
+    `prepare ${U}/o/cards_a.webp 5 0`, `finalize ${U}/o/cards_a.webp`,
+    `prepare ${U}/o/small_a.webp 30 0`, `finalize ${U}/o/small_a.webp`,
+    `prepare ${U}/o/thumb_a.webp 10 0`, `finalize ${U}/o/thumb_a.webp`,
+    `prepare ${U}/o/thumb_small_a.webp 0 0`, `finalize ${U}/o/thumb_small_a.webp`,
+  ])
+  // Every prepare precedes that key's delete.
+  assertEquals(legacy.has(`${U}/o/a.webp`) || priv.has(`${U}/o/a.webp`), false)
+  assertEquals(admin.calls.some(c => c.startsWith('rpc:finalize_observation_image_purge')), false)
+})
+
+Deno.test('sweep ledger: keys the Worker already deleted prepare 0 bytes and no image', async () => {
+  const client = new R2MultiBucketClient([fakeBucket('private', {})] as never)
+  const admin = fakeAdmin({
+    claim_retired_key_sweep: [{ data: [{ retirement_id: 51, user_id: U, image_id: 1, reason: 'release', status: 'ok', delete_keys: [`${U}/o/a.webp`] }], error: null }],
+    prepare_media_object_deletion: [{ data: null, error: null }],
+    finalize_media_object_deletion: [{ data: [{}], error: null }],
+    record_retired_key_sweep: [{ data: 1, error: null }],
+  })
+  await runRetiredKeySweep({ adminClient: admin.client, env: ENABLED }, { limit: 50, batches: 1 }, async () => ({ ok: true, client: client as any }))
+  assertEquals(ledgerCalls(admin.calls), [`prepare ${U}/o/a.webp 0 0`, `finalize ${U}/o/a.webp`])
+})
+
+Deno.test('sweep ledger: a failed prepare deletes nothing for that key and leaves the record for the next sweep', async () => {
+  const key = `${U}/o/a.webp`
+  const priv = fakeBucket('private', { [key]: 100 })
+  const client = new R2MultiBucketClient([priv] as never)
+  const admin = fakeAdmin({
+    claim_retired_key_sweep: [{ data: [{ retirement_id: 52, user_id: U, image_id: 1, reason: 'release', status: 'ok', delete_keys: [key] }], error: null }],
+    prepare_media_object_deletion: [{ data: null, error: { message: 'down' } }],
+    record_retired_key_sweep: [{ data: 0, error: null }],
+  })
+  const result: any = await runRetiredKeySweep({ adminClient: admin.client, env: ENABLED }, { limit: 50, batches: 1 }, async () => ({ ok: true, client: client as any }))
+  assertEquals(result.counts.errors, 1)
+  assertEquals(priv.has(key), true)
+  assertEquals(priv.deleted, [])
+  assertEquals(admin.calls.some(c => c.startsWith('rpc:finalize_media_object_deletion')), false)
+  assertEquals(admin.calls.some(c => c.startsWith('rpc:record_retired_key_sweep')), false)
+})
+
+Deno.test('sweep ledger: a failed finalize after the delete is an error, so the next sweep finalizes the kept snapshot', async () => {
+  const key = `${U}/o/a.webp`
+  const priv = fakeBucket('private', { [key]: 100 })
+  const client = new R2MultiBucketClient([priv] as never)
+  const admin = fakeAdmin({
+    claim_retired_key_sweep: [{ data: [{ retirement_id: 53, user_id: U, image_id: 1, reason: 'release', status: 'ok', delete_keys: [key] }], error: null }],
+    prepare_media_object_deletion: [{ data: null, error: null }],
+    finalize_media_object_deletion: [{ data: null, error: { message: 'down' } }],
+  })
+  const result: any = await runRetiredKeySweep({ adminClient: admin.client, env: ENABLED }, { limit: 50, batches: 1 }, async () => ({ ok: true, client: client as any }))
+  assertEquals(result.counts.errors, 1)
+  assertEquals(priv.has(key), false)
+  assertEquals(admin.calls.some(c => c.startsWith('rpc:record_retired_key_sweep')), false)
+})
+
+Deno.test('sweep ledger: a purge with a live image uses the purge finalizer, a purge whose row is gone uses the ledger', async () => {
+  const priv = fakeBucket('private', { [`${U}/o/live.webp`]: 70, [`${U}/o/gone.webp`]: 40 })
+  const client = new R2MultiBucketClient([priv] as never)
+  const admin = fakeAdmin({
+    claim_retired_key_sweep: [{ data: [
+      { retirement_id: 54, user_id: U, image_id: 1, reason: 'purge', status: 'ok', delete_keys: [`${U}/o/live.webp`], image_exists: true, image_purged_at: null },
+      { retirement_id: 55, user_id: U, image_id: 2, reason: 'purge', status: 'ok', delete_keys: [`${U}/o/gone.webp`], image_exists: false, image_purged_at: null },
+    ], error: null }],
+    finalize_observation_image_purge: [{ data: [{ quota_changed: true }], error: null }],
+    prepare_media_object_deletion: [{ data: null, error: null }],
+    finalize_media_object_deletion: [{ data: [{}], error: null }],
+    record_retired_key_sweep: [{ data: 2, error: null }],
+  })
+  const result: any = await runRetiredKeySweep({ adminClient: admin.client, env: ENABLED }, { limit: 50, batches: 1 }, async () => ({ ok: true, client: client as any }))
+  assertEquals(result.counts, { swept: 2, guard_failed: 0, errors: 0, finalized: 1 })
+  assertEquals(ledgerCalls(admin.calls), [`prepare ${U}/o/gone.webp 40 1`, `finalize ${U}/o/gone.webp`])
+  const finalize = admin.calls.find(c => c.startsWith('rpc:finalize_observation_image_purge'))!
+  assertEquals(JSON.parse(finalize.split(':').slice(2).join(':')).p_storage_bytes, 70)
+})
+
+Deno.test('sweep ledger: a ledger record without a valid owner id deletes nothing', async () => {
+  const r2 = fakeR2()
+  const admin = fakeAdmin({
+    claim_retired_key_sweep: [{ data: [{ retirement_id: 56, image_id: 1, reason: 'release', status: 'ok', delete_keys: [`${U}/o/a.webp`] }], error: null }],
+  })
+  const result: any = await runRetiredKeySweep({ adminClient: admin.client, env: ENABLED }, { limit: 50, batches: 1 }, async () => ({ ok: true, client: r2 as any }))
+  assertEquals(result.counts.errors, 1)
+  assertEquals(r2.deleted, [])
 })
 
 Deno.test('purge accounting ignores the client-written stored_bytes', async () => {
@@ -759,4 +877,40 @@ Deno.test('purge accounting ignores the client-written stored_bytes', async () =
   const failing = fakeAdmin({ claim_tombstoned_image_purge: [{ data: { status: 'claimed', delete_keys: ['user/b.webp'] }, error: null }] })
   await purgeSingleTombstoneRow({ adminClient: failing.client, env: ENABLED }, { ...PURGE_ROW, stored_bytes: 999999 }, fakeR2({ fail: true }) as any)
   assertEquals(failing.updates.map(u => u.purge_accounting_bytes), [0])
+})
+
+Deno.test('sweep ledger: a key left in one bucket is not finalized, so the next sweep debits it once', async () => {
+  const key = `${U}/o/a.webp`
+  const legacy = fakeBucket('legacy', { [key]: 100 })
+  const priv = fakeBucket('private', { [key]: 100 }, { failDelete: true })
+  const client = new R2MultiBucketClient([legacy, priv] as never)
+  const admin = fakeAdmin({
+    claim_retired_key_sweep: [{ data: [{ retirement_id: 57, user_id: U, image_id: 1, reason: 'release', status: 'ok', delete_keys: [key] }], error: null }],
+    prepare_media_object_deletion: [{ data: null, error: null }],
+    finalize_media_object_deletion: [{ data: [{}], error: null }],
+  })
+  const result: any = await runRetiredKeySweep({ adminClient: admin.client, env: ENABLED }, { limit: 50, batches: 1 }, async () => ({ ok: true, client: client as any }))
+  assertEquals(result.counts.errors, 1)
+  assertEquals(ledgerCalls(admin.calls), [`prepare ${key} 100 1`])
+  assertEquals(admin.calls.some(c => c.startsWith('rpc:record_retired_key_sweep')), false)
+})
+
+Deno.test('sweep ledger: thumbs, originals and mosaics never count as an image', async () => {
+  assertEquals(isPrimaryMediaKey(`${U}/o/a.webp`), true)
+  assertEquals(isPrimaryMediaKey(`${U}/o/thumb_a.webp`), false)
+  assertEquals(isPrimaryMediaKey(`${U}/o/originals/7/a.heic`), false)
+  assertEquals(isPrimaryMediaKey(`${U}/o/spore_mosaic_1.webp`), false)
+  const thumb = `${U}/o/thumb_a.webp`
+  const client = new R2MultiBucketClient([fakeBucket('private', { [thumb]: 9 })] as never)
+  const admin = fakeAdmin({
+    claim_retired_key_sweep: [{ data: [{ retirement_id: 58, user_id: U, image_id: 1, reason: 'release', status: 'ok', delete_keys: [`${U}/o/a.webp`, thumb] }], error: null }],
+    prepare_media_object_deletion: [{ data: null, error: null }],
+    finalize_media_object_deletion: [{ data: [{}], error: null }],
+    record_retired_key_sweep: [{ data: 1, error: null }],
+  })
+  await runRetiredKeySweep({ adminClient: admin.client, env: ENABLED }, { limit: 50, batches: 1 }, async () => ({ ok: true, client: client as any }))
+  assertEquals(ledgerCalls(admin.calls), [
+    `prepare ${U}/o/a.webp 0 0`, `finalize ${U}/o/a.webp`,
+    `prepare ${thumb} 9 0`, `finalize ${thumb}`,
+  ])
 })

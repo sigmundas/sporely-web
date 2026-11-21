@@ -1420,6 +1420,12 @@ export async function runRetiredKeySweep(
         continue
       }
       if (!isTombstonePurgeEnabled(context.env)) break
+      // A purge whose image row still exists is debited by the purge
+      // finalizer (or already was, when image_purged_at is set). Every other
+      // record (a release, or a purge whose row was removed by an observation
+      // hard delete) has its bytes debited per key through the Worker's
+      // ledger, which the desktop's own Worker DELETE of the same keys shares.
+      const purgeFinalizerOwnsQuota = record.reason === 'purge' && record.image_exists !== false
       try {
         let logicalBytes = 0
         if (keys.length) {
@@ -1428,14 +1434,22 @@ export async function runRetiredKeySweep(
             if (!prepared.ok) throw actionError(prepared.failure.status, prepared.failure.code, prepared.failure.message)
             r2Client = prepared.client
           }
-          const deletion = await r2Client.deleteObjects(keys)
+          let deletion
+          if (purgeFinalizerOwnsQuota) {
+            deletion = await r2Client.deleteObjects(keys)
+          } else {
+            const userId = normalizeText(record.user_id)
+            if (!isValidTombstoneUuid(userId)) throw actionError(500, 'sweep_record_user_missing', 'Retirement record has no owner id')
+            const ledger = mediaDeleteLedger(context.adminClient, userId, keys)
+            deletion = await r2Client.deleteObjects(ledger.keys, ledger.hooks)
+          }
           logicalBytes = Number(deletion?.logicalBytes || 0)
         }
         // Finalize only a purge whose image row still exists and is not yet
         // purged. A row removed by account deletion or an observation hard
         // delete (ON DELETE CASCADE), or one already purged, needs no
         // finalize: its keys are deleted and the record counts as done.
-        if (record.reason === 'purge' && record.image_exists !== false && !record.image_purged_at) {
+        if (purgeFinalizerOwnsQuota && !record.image_purged_at) {
           const finalized = await callRpcWithRetry(context.adminClient, 'finalize_observation_image_purge', {
             p_image_id: record.image_id,
             p_purged_at: new Date().toISOString(),
@@ -1976,6 +1990,68 @@ async function prepareR2PurgeClient(env: Record<string, string | undefined>, pre
   }
 }
 
+export type MediaDeleteHooks = {
+  beforeDelete?: (key: string, snapshot: { bytes: number; held: boolean }) => Promise<void>
+  afterDelete?: (key: string, snapshot: { bytes: number; held: boolean }) => Promise<void>
+}
+
+// Mirrors isPrimaryImageKey in cloudflare/r2-upload-worker/src/index.js: the
+// key of a logical observation image (not a thumb, an original or a mosaic).
+export function isPrimaryMediaKey(key: string): boolean {
+  const normalized = String(key || '').replace(/^\/+/, '')
+  const filename = normalized.split('/').pop() || ''
+  if (!filename || filename.startsWith('thumb_')) return false
+  if (normalized.includes('/originals/')) return false
+  if (/^spore_mosaic(?:_|\.)/i.test(filename)) return false
+  return true
+}
+
+const MEDIA_VARIANT_PREFIX = /^(?:thumb_|small_|medium_|cards_|preview_)/
+
+// Quota debits for raw key deletes go through the Worker's per-key ledger
+// (public.prepare_media_object_deletion / finalize_media_object_deletion),
+// with the size measured in R2 just before the delete. The ledger keeps one
+// row per (user, key), so the sweep and the desktop's Worker DELETE of the
+// same key debit once between them: whichever runs second finds the object
+// gone, prepares 0 bytes and finalizes nothing new. A crash between the
+// delete and the finalize is finished by the next attempt, because prepare
+// keeps the larger earlier snapshot until the row is finalized.
+//
+// At most one logical image is debited per call: the first held primary
+// key, with keys ordered so an unprefixed file name comes first.
+export function mediaDeleteLedger(adminClient: any, userId: string, keys: string[]) {
+  const ordered = [
+    ...keys.filter(key => !MEDIA_VARIANT_PREFIX.test(key.split('/').pop() || '')),
+    ...keys.filter(key => MEDIA_VARIANT_PREFIX.test(key.split('/').pop() || '')),
+  ]
+  let imageCounted = false
+  const hooks: MediaDeleteHooks = {
+    beforeDelete: async (key, { bytes, held }) => {
+      const imageCount = !imageCounted && held && isPrimaryMediaKey(key) ? 1 : 0
+      const { error } = await callRpcWithRetry(adminClient, 'prepare_media_object_deletion', {
+        p_user_id: userId,
+        p_storage_key: key,
+        p_storage_bytes: Math.max(0, Math.trunc(bytes)),
+        p_image_count: imageCount,
+      })
+      if (error) {
+        throw actionError(500, 'media_delete_accounting_prepare_failed', error.message || 'prepare_media_object_deletion failed')
+      }
+      if (imageCount) imageCounted = true
+    },
+    afterDelete: async key => {
+      const { error } = await callRpcWithRetry(adminClient, 'finalize_media_object_deletion', {
+        p_user_id: userId,
+        p_storage_key: key,
+      })
+      if (error) {
+        throw actionError(500, 'media_delete_accounting_finalize_failed', error.message || 'finalize_media_object_deletion failed')
+      }
+    },
+  }
+  return { keys: ordered, hooks }
+}
+
 export class R2MultiBucketClient {
   clients: R2BatchClient[]
 
@@ -2022,7 +2098,11 @@ export class R2MultiBucketClient {
     }
   }
 
-  async deleteObjects(keys: Iterable<string>) {
+  // hooks.beforeDelete runs once per key after every bucket was inspected and
+  // before any delete of that key; a throw skips the key's delete. Hooks
+  // .afterDelete runs only when the key is gone from every bucket. Both get
+  // the key's logical size (the largest copy) and whether any copy existed.
+  async deleteObjects(keys: Iterable<string>, hooks: MediaDeleteHooks = {}) {
     const cleaned = [...new Set([...keys].map(key => normalizeMediaKey(key)).filter(Boolean))]
     let logicalBytes = 0
     const targets: Array<Record<string, unknown>> = []
@@ -2040,7 +2120,22 @@ export class R2MultiBucketClient {
         }
         continue
       }
-      logicalBytes += Math.max(0, ...heads.map(result => result.ok ? Number(result.size || 0) : 0))
+      const snapshot = {
+        bytes: Math.max(0, ...heads.map(result => result.ok ? Number(result.size || 0) : 0)),
+        held: heads.some(result => result.ok),
+      }
+      logicalBytes += snapshot.bytes
+
+      if (hooks.beforeDelete) {
+        try {
+          await hooks.beforeDelete(key, snapshot)
+        } catch (error) {
+          const failure = normalizeActionFailure(error)
+          firstFailure ??= failure
+          targets.push({ key, role: 'all', operation: 'accounting_prepare', ok: false, error: failure.message })
+          continue
+        }
+      }
 
       const deletes = await Promise.all(this.clients.map(async client => {
         try {
@@ -2053,6 +2148,16 @@ export class R2MultiBucketClient {
         }
       }))
       targets.push(...deletes)
+
+      if (hooks.afterDelete && deletes.every(result => result.ok)) {
+        try {
+          await hooks.afterDelete(key, snapshot)
+        } catch (error) {
+          const failure = normalizeActionFailure(error)
+          firstFailure ??= failure
+          targets.push({ key, role: 'all', operation: 'accounting_finalize', ok: false, error: failure.message })
+        }
+      }
     }
 
     if (firstFailure) {
