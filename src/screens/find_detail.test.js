@@ -1522,3 +1522,11 @@ test('find detail starts id-keyed requests before the observation and reveals th
   assert.match(source, /if \(loadGeneration === detailLoadGeneration\) _setDetailLoading\(false\)/)
   assert.match(css, /\.review-body\.is-detail-loading > \* \{\s*visibility: hidden;/)
 })
+
+test('comment mention suggestions escape usernames and display names', () => {
+  const source = fs.readFileSync(new URL('./find_detail.js', import.meta.url), 'utf8')
+  assert.match(
+    source,
+    /<li data-idx="\$\{i\}" data-username="\$\{_esc\(u\.username\)\}">@\$\{_esc\(u\.username\)\}\$\{u\.display_name \? ` · \$\{_esc\(u\.display_name\)\}` : ''\}<\/li>/,
+  )
+})

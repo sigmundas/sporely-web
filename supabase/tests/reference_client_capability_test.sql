@@ -15,7 +15,7 @@
 --      pagination, argument validation (incl. 1.0 and the nil device id);
 --   E. non-capable writes touching withheld/enhanced content are refused
 --      with requires_newer_client and change nothing; v1 writes still work;
---   F. creation guard incl. the 30-day window edges and the no-report case;
+--   F. single-user creation remains usable with stale v1 device records;
 --   G. trust boundary: predicates answer only for the caller, device table
 --      owner-only, grants, one function per name.
 -- Every transaction is rolled back. To see which blocks fail on other
@@ -387,87 +387,36 @@ BEGIN
 END
 $$;
 
--- F. Creation guard ---------------------------------------------------------------
+-- F. Single-user creation: stale device records no longer block full content.
 DO $$
-DECLARE r jsonb;
+DECLARE r jsonb; v_snapshot jsonb;
   o constant uuid := '00000000-0000-4000-8000-0000000b3001';
   tr constant text := '72000000-0000-4000-8000-0000000b3001';
-  cap constant jsonb := '{"reference_snapshot_versions":[1,2],"device_id":"5e000000-0000-4000-8000-0000000b3001","client":"desktop_app","app_version":"0.9.30"}';
+  cap constant jsonb := '{"reference_snapshot_versions":[1,2],"device_id":"5e000000-0000-4000-8000-0000000b3001","client":"desktop_app"}';
   qav constant jsonb := '{"schema_version":1,"metrics":{"q":{"mean_interval":{"lower":1.6,"upper":2,"kind":"reported_range"}}}}';
 BEGIN
   DELETE FROM public.reference_client_devices WHERE user_id=o;
+  INSERT INTO public.reference_client_devices(user_id,device_id,reference_snapshot_versions,last_seen_at)
+  VALUES (o,'5e000000-0000-4000-8000-0000000b3002',ARRAY[1],clock_timestamp());
   PERFORM pg_temp.claims(o);
-  -- F1 no device has reported: usable (capable creation allowed)
-  SET LOCAL ROLE authenticated;
-  r := public.sync_reference_measurement_set(jsonb_build_object('id','73000000-0000-4000-8000-0000000b3021',
-         'taxon_treatment_id',tr,'character','spore_size','data_kind','range','raw_text','Qav 1.6-2','revision',1,
-         'measurement_details_json',qav,'q_core_min',NULL,'q_core_max',NULL),0,cap);
-  RESET ROLE;
-  IF r->>'status' <> 'created' THEN RAISE EXCEPTION 'F1: no reports yet: %', r; END IF;
-  IF (SELECT reference_snapshot_versions FROM public.reference_client_devices
-       WHERE user_id=o AND device_id='5e000000-0000-4000-8000-0000000b3001') <> ARRAY[1,2] THEN
-    RAISE EXCEPTION 'F1: caller device not recorded'; END IF;
-  -- F2 an undeclared (legacy) write records the legacy pseudo-device ...
-  SET LOCAL ROLE authenticated;
-  r := public.sync_reference_measurement_set(jsonb_build_object('id','73000000-0000-4000-8000-0000000b3001',
-         'taxon_treatment_id',tr,'raw_text','8-11 um','revision',3),1);
-  RESET ROLE;
-  IF NOT EXISTS (SELECT 1 FROM public.reference_client_devices WHERE user_id=o
-                  AND device_id='00000000-0000-0000-0000-000000000000' AND reference_snapshot_versions=ARRAY[1]) THEN
-    RAISE EXCEPTION 'F2: legacy writer not recorded'; END IF;
-  -- ... which blocks new enhanced content, also via a use
+  IF private.reference_creation_blocked_by_older_client(o,cap) THEN
+    RAISE EXCEPTION 'F: stale v1 device still blocks single-user creation';
+  END IF;
   SET LOCAL ROLE authenticated;
   r := public.sync_reference_measurement_set(jsonb_build_object('id','73000000-0000-4000-8000-0000000b3022',
          'taxon_treatment_id',tr,'character','spore_size','data_kind','range','raw_text','Qav 1.6-2','revision',1,
          'measurement_details_json',qav,'q_core_min',NULL,'q_core_max',NULL),0,cap);
-  IF r->>'status' <> 'older_client_active' THEN RESET ROLE; RAISE EXCEPTION 'F2: guard on create: %', r; END IF;
-  r := public.sync_reference_measurement_set(jsonb_build_object('id','73000000-0000-4000-8000-0000000b3005',
-         'taxon_treatment_id',tr,'raw_text','10-12 um','revision',2,'measurement_details_json',qav,'q_core_min',NULL,'q_core_max',NULL),1,cap);
-  IF r->>'status' <> 'older_client_active' THEN RESET ROLE; RAISE EXCEPTION 'F2: guard on upgrade: %', r; END IF;
+  RESET ROLE;
+  IF r->>'status' <> 'created' THEN RAISE EXCEPTION 'F: enhanced creation: %', r; END IF;
+  v_snapshot := private.reference_canonical_snapshot(o,'73000000-0000-4000-8000-0000000b3022');
+  SET LOCAL ROLE authenticated;
   r := public.sync_observation_reference_use(jsonb_build_object('id','74000000-0000-4000-8000-0000000b3026',
-         'observation_id',982000006,'reference_measurement_set_id','73000000-0000-4000-8000-0000000b3002',
-         'role','compared','reference_revision',1),0,'current',cap);
-  IF r->>'status' <> 'older_client_active' THEN RESET ROLE; RAISE EXCEPTION 'F2: guard on use: %', r; END IF;
-  -- editing already-enhanced content is not new content: allowed
-  r := public.sync_reference_measurement_set(jsonb_build_object('id','73000000-0000-4000-8000-0000000b3002',
-         'taxon_treatment_id',tr,'raw_text','Sp. 7-9.5 um, Qav = 1.6-2.0','revision',2,
-         'measurement_details_json',qav,'q_core_min',NULL,'q_core_max',NULL),1,cap);
+         'observation_id',982000006,'reference_measurement_set_id','73000000-0000-4000-8000-0000000b3022',
+         'role','compared','reference_revision',1,'snapshot_json',v_snapshot),0,'current',cap);
   RESET ROLE;
-  IF r->>'status' <> 'updated' THEN RAISE EXCEPTION 'F2: capable edit of enhanced set: %', r; END IF;
-  -- F3 window edges: inside (30 days minus a minute) blocks, outside (30 days
-  -- plus a second) does not.
-  UPDATE public.reference_client_devices SET last_seen_at=clock_timestamp()-interval '30 days'+interval '1 minute'
-   WHERE user_id=o AND device_id='00000000-0000-0000-0000-000000000000';
-  SET LOCAL ROLE authenticated;
-  r := public.sync_reference_measurement_set(jsonb_build_object('id','73000000-0000-4000-8000-0000000b3022',
-         'taxon_treatment_id',tr,'character','spore_size','data_kind','range','raw_text','Qav 1.6-2','revision',1,
-         'measurement_details_json',qav,'q_core_min',NULL,'q_core_max',NULL),0,cap);
-  RESET ROLE;
-  IF r->>'status' <> 'older_client_active' THEN RAISE EXCEPTION 'F3: inside window: %', r; END IF;
-  UPDATE public.reference_client_devices SET last_seen_at=clock_timestamp()-interval '30 days'-interval '1 second'
-   WHERE user_id=o AND device_id='00000000-0000-0000-0000-000000000000';
-  SET LOCAL ROLE authenticated;
-  r := public.sync_reference_measurement_set(jsonb_build_object('id','73000000-0000-4000-8000-0000000b3022',
-         'taxon_treatment_id',tr,'character','spore_size','data_kind','range','raw_text','Qav 1.6-2','revision',1,
-         'measurement_details_json',qav,'q_core_min',NULL,'q_core_max',NULL),0,cap);
-  RESET ROLE;
-  IF r->>'status' <> 'created' THEN RAISE EXCEPTION 'F3: outside window: %', r; END IF;
-  -- F4 a declared v1-only device blocks; once it reports [1,2] it does not;
-  -- the caller's own device never blocks itself.
-  SET LOCAL ROLE authenticated;
-  r := public.record_reference_client_capabilities('{"reference_snapshot_versions":[1],"device_id":"5e000000-0000-4000-8000-0000000b3002","client":"web_browser"}');
-  IF r->>'status' <> 'recorded' THEN RESET ROLE; RAISE EXCEPTION 'F4: record: %', r; END IF;
-  r := public.sync_reference_measurement_set(jsonb_build_object('id','73000000-0000-4000-8000-0000000b3023',
-         'taxon_treatment_id',tr,'character','spore_size','data_kind','range','raw_text','Qav 1.6-2','revision',1,
-         'measurement_details_json',qav,'q_core_min',NULL,'q_core_max',NULL),0,cap);
-  IF r->>'status' <> 'older_client_active' THEN RESET ROLE; RAISE EXCEPTION 'F4: v1 device: %', r; END IF;
-  PERFORM public.record_reference_client_capabilities('{"reference_snapshot_versions":[1,2],"device_id":"5e000000-0000-4000-8000-0000000b3002"}');
-  r := public.sync_reference_measurement_set(jsonb_build_object('id','73000000-0000-4000-8000-0000000b3023',
-         'taxon_treatment_id',tr,'character','spore_size','data_kind','range','raw_text','Qav 1.6-2','revision',1,
-         'measurement_details_json',qav,'q_core_min',NULL,'q_core_max',NULL),0,
-         '{"reference_snapshot_versions":[1,2],"device_id":"5e000000-0000-4000-8000-0000000b3002"}');
-  RESET ROLE;
-  IF r->>'status' <> 'created' THEN RAISE EXCEPTION 'F4: upgraded device: %', r; END IF;
+  IF r->>'status' <> 'created' OR r->'row'->'snapshot_json'->>'schema_version' <> '2' THEN
+    RAISE EXCEPTION 'F: full-content attachment: %', r;
+  END IF;
 END
 $$;
 

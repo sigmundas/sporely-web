@@ -105,6 +105,24 @@ begin
     raise exception 'missing bridge row not reported: %', v_errors;
   end if;
 
+  -- A release name association is accepted provenance; any other note is not.
+  insert into public.taxonomy_v2_external_ids(
+    release_id, sporely_taxon_id, source_system, namespace, external_id, id_role, is_preferred, external_name, note
+  ) values
+    ('tax-2026.09.29-01', 83668, 'nortaxa', 'nortaxa_taxon_id', '52369', 'accepted', false,
+     'Pholiotina rugosa', 'name_association:exact_accepted_name');
+  v_errors := public.taxonomy_v2_national_name_errors('tax-2026.09.29-01');
+  if v_errors <> '[]'::jsonb then
+    raise exception 'name-association provenance was refused: %', v_errors;
+  end if;
+  update public.taxonomy_v2_external_ids set note = 'cross_source_automatic_exact'
+    where release_id = 'tax-2026.09.29-01' and external_id = '52369';
+  v_errors := public.taxonomy_v2_national_name_errors('tax-2026.09.29-01');
+  if v_errors <> '["preferred_scientific_name_no of 83668 has no authoritative bridge row"]'::jsonb then
+    raise exception 'unlabelled automatic match accepted as provenance: %', v_errors;
+  end if;
+  delete from public.taxonomy_v2_external_ids where release_id = 'tax-2026.09.29-01';
+
   -- A name that is not one of the concept's scientific names is reported.
   delete from public.taxonomy_v2_scientific_names
     where release_id = 'tax-2026.09.29-01' and scientific_name = 'Pholiotina rugosa';

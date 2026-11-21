@@ -711,15 +711,41 @@ export function renderIdentifyRedlistSummary(prediction = {}) {
   `
 }
 
+// Species links can come from identification rows written by another user
+// (the community view passes `species_url` through unchanged), so a stored
+// URL is only rendered when it is https on a known provider host. This keeps
+// `javascript:` URLs and app-origin paths (such as Capacitor's internal
+// `/_capacitor_http_interceptor_` proxy) out of the rendered link.
+// The parsed `href` is rendered rather than the stored string, because a
+// browser resolves some strings that parse as absolute (`https:/host/...`)
+// as paths on the current origin.
+const SPECIES_LINK_HOSTS = ['artsdatabanken.no', 'inaturalist.org']
+
+function _toAllowedSpeciesLinkUrl(value) {
+  if (typeof value !== 'string' || !value) return null
+  let url
+  try {
+    url = new URL(value)
+  } catch (_) {
+    return null
+  }
+  if (url.protocol !== 'https:') return null
+  if (url.username || url.password || url.port) return null
+  const host = url.hostname.toLowerCase()
+  const allowed = SPECIES_LINK_HOSTS.some(known => host === known || host.endsWith(`.${known}`))
+  return allowed ? url.href : null
+}
+
 function _getPredictionSpeciesLinkUrl(prediction = {}) {
   const service = normalizeIdentifyService(prediction.service)
-  const speciesUrl = _normalizeNullableText(
+  const rawSpeciesUrl = _normalizeNullableText(
     prediction.speciesUrl
     ?? prediction.species_url
     ?? prediction.adbUrl
     ?? prediction.url
     ?? prediction.href
   )
+  const speciesUrl = _toAllowedSpeciesLinkUrl(rawSpeciesUrl)
   if (service === ID_SERVICE_ARTSORAKEL && speciesUrl) {
     return speciesUrl
   }
@@ -1656,7 +1682,7 @@ export function renderIdentifyResultRows(service, predictions = []) {
     .map(prediction => normalizeIdentifyPrediction(normalizedService, prediction))
     .map(prediction => `
       <div class="ai-result-row">
-        <button type="button" class="ai-result-row-button" data-identify-result='${JSON.stringify(prediction).replace(/'/g, '&#39;')}'>
+        <button type="button" class="ai-result-row-button" data-identify-result='${JSON.stringify(prediction).replace(/&/g, '&amp;').replace(/'/g, '&#39;')}'>
           <span class="ai-result-row-main">
             ${(() => {
               const display = formatAiSuggestionDisplay(prediction)

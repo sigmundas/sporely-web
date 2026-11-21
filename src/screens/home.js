@@ -578,14 +578,14 @@ function _recentFindRowHtml(obs, profileMap) {
   return `<div class="find-row" data-id="${obs.id}" data-home-media-identity="${mediaIdentity}" style="cursor:pointer">
     <div class="find-thumb-wrap">${thumb}</div>
     <div class="find-meta">
-      <div class="find-common${isIdentified ? '' : ' unidentified'}" style="display:flex;align-items:center;gap:5px">${dot}${displayName}</div>
+      <div class="find-common${isIdentified ? '' : ' unidentified'}" style="display:flex;align-items:center;gap:5px">${dot}${_esc(displayName)}</div>
       <div class="find-meta-line">
-        ${subtitle ? `<div class="find-latin">${subtitle}</div>` : '<div class="find-latin find-latin--empty"></div>'}
+        ${subtitle ? `<div class="find-latin">${_esc(subtitle)}</div>` : '<div class="find-latin find-latin--empty"></div>'}
         ${authorLabel ? `<div class="find-owner-name">${authorLabel}</div>` : ''}
       </div>
       <div class="find-location">
         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
-        ${loc}
+        ${_esc(loc)}
       </div>
     </div>
   </div>`
@@ -626,6 +626,11 @@ function _syncRecentFindImageData(currentThumb, nextThumb) {
     else if (currentImage.dataset) delete currentImage.dataset[name]
   }
   return { currentImage, transportChanged }
+}
+
+// Test-visible seam for the recent-find row markup.
+export function recentFindRowHtmlForTests(obs, profileMap = {}) {
+  return _recentFindRowHtml(obs, profileMap)
 }
 
 // Test-visible reconciliation seam. Existing rows and their already-resolved

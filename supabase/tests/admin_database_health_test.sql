@@ -40,6 +40,7 @@ BEGIN
       ('storage', 'objects', false, 'system_other', 'supabase_platform'),
       ('pg_catalog', 'pg_class', false, 'system_other', 'postgres_catalog'),
       ('public', 'client_activity_daily', false, 'system_other', 'app_operations'),
+      ('private', 'sync_client_write_block', false, 'system_other', 'app_operations'),
       -- Future tables: taxonomy by pattern, never user data.
       ('public', 'taxonomy_v4_taxa', true, 'taxonomy_reference', 'taxonomy_release_payload'),
       ('public', 'taxonomy_v2_new_lookup', false, 'taxonomy_reference', 'taxonomy_registry'),

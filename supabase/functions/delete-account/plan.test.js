@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 import {
+  SNAPSHOT_PAGE_SIZE,
+  R2_DELETE_CONCURRENCY,
   requireSuccess,
   runDeletionPlan,
   STAGES,
@@ -154,6 +156,28 @@ test('requireSuccess throws with the label when error is present', async () => {
 
 // ── Mock supabase client ────────────────────────────────────────────
 
+// Rows without an id get their 1-based position, so plain fixtures can be
+// served by keyset pagination.
+function withIds(rows) {
+  return rows.map((row, i) => (row && 'id' in row ? row : { id: i + 1, ...row }))
+}
+
+// Applies the PostgREST filters the plan uses (id > gt, order by id,
+// offset range, limit) to `rows`, capped at `maxRows` (the server max_rows).
+function serveRows(rows, filters, maxRows = Infinity) {
+  let out = [...rows]
+  for (const f of filters) {
+    if (f.method === 'gt') out = out.filter(row => row[f.col] > f.val)
+  }
+  const order = filters.find(f => f.method === 'order')
+  if (order) out.sort((a, b) => (a[order.col] - b[order.col]) * (order.opts?.ascending === false ? -1 : 1))
+  const range = filters.find(f => f.method === 'range')
+  if (range) out = out.slice(range.from, range.to + 1)
+  const limit = filters.find(f => f.method === 'limit')
+  if (limit) out = out.slice(0, limit.count)
+  return out.slice(0, maxRows)
+}
+
 function fakeAdmin(overrides = {}) {
   const calls = []
   const _table = (table) => {
@@ -166,7 +190,15 @@ function fakeAdmin(overrides = {}) {
     const settle = () => {
       calls.push({ table: chain._table, op: chain._op, filters: [...chain._filters] })
       const override = overrides.tableResponses?.[chain._table]?.[chain._op]
-      if (override) return Promise.resolve(override(chain))
+      if (override) {
+        const result = override(chain)
+        // Like PostgREST, a paged select returns only the rows its filters,
+        // order and limit select (unless the override already pages itself).
+        if (chain._op === 'select' && !override.paged && Array.isArray(result?.data)) {
+          return Promise.resolve({ ...result, data: serveRows(withIds(result.data), chain._filters) })
+        }
+        return Promise.resolve(result)
+      }
       return Promise.resolve({ data: [], error: null })
     }
     const builder = {
@@ -182,6 +214,10 @@ function fakeAdmin(overrides = {}) {
       then: (res, rej) => settle().then(res, rej),
       eq: (col, val) => { chain._filters.push({ method: 'eq', col, val }); return _thenable() },
       or: (expr) => { chain._filters.push({ method: 'or', expr }); return _thenable() },
+      gt: (col, val) => { chain._filters.push({ method: 'gt', col, val }); return _thenable() },
+      order: (col, opts) => { chain._filters.push({ method: 'order', col, opts }); return _thenable() },
+      range: (from, to) => { chain._filters.push({ method: 'range', from, to }); return _thenable() },
+      limit: (count) => { chain._filters.push({ method: 'limit', count }); return _thenable() },
     })
     return builder
   }
@@ -194,7 +230,7 @@ function fakeAdmin(overrides = {}) {
       if (override) return Promise.resolve(override(params))
       return Promise.resolve({ data: null, error: null })
     },
-    storage: {
+    storage: overrides.storage || {
       from: () => ({
         list: async () => (overrides.storageListError ? { data: null, error: { message: overrides.storageListError } } : { data: [], error: null }),
         remove: async () => ({ data: null, error: null }),
@@ -376,6 +412,101 @@ test('runDeletionPlan: R2 500 fails the stage and preserves the auth user', asyn
   ],
     'a failed key must not prevent remaining snapshotted identities from being attempted')
   assert.equal(admin._calls.find(c => c.op === 'deleteUser'), undefined)
+})
+
+// A worker whose deletes stay pending until the test settles them, so it can
+// observe how many are in flight at once.
+function gatedWorker(statusByKey = {}) {
+  const pending = []
+  const attempted = []
+  let inFlight = 0
+  let maxInFlight = 0
+  return {
+    attempted,
+    pending,
+    maxInFlight: () => maxInFlight,
+    deleteKey(key) {
+      attempted.push(key)
+      inFlight += 1
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      return new Promise(resolve => {
+        pending.push(() => {
+          inFlight -= 1
+          const status = statusByKey[key] ?? 200
+          if (status === 404) resolve({ ok: true, status })
+          else if (status >= 400) resolve({ ok: false, status, detail: `HTTP ${status}` })
+          else resolve({ ok: true, status })
+        })
+      })
+    },
+  }
+}
+
+// Settles pending deletes one microtask turn at a time until the stage ends.
+async function drain(worker, done) {
+  let finished = false
+  done.then(() => { finished = true })
+  while (!finished) {
+    await new Promise(resolve => setImmediate(resolve))
+    while (worker.pending.length) worker.pending.shift()()
+  }
+  return done
+}
+
+function stage(name) {
+  return STAGES.find(s => s.name === name)
+}
+
+test('delete_r2_media never has more than R2_DELETE_CONCURRENCY deletes in flight', async () => {
+  const keys = Array.from({ length: R2_DELETE_CONCURRENCY * 4 + 3 }, (_, i) => `${UID}/obs/${i}.webp`)
+  const worker = gatedWorker()
+  const done = stage('delete_r2_media').apply({ uid: UID, admin: fakeAdmin(), worker, r2Keys: new Set(keys) })
+  // Before anything settles, exactly the limit has started.
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(worker.attempted.length, R2_DELETE_CONCURRENCY)
+  const result = await drain(worker, done)
+  assert.deepEqual(result, { ok: true })
+  assert.equal(worker.maxInFlight(), R2_DELETE_CONCURRENCY)
+  assert.deepEqual([...worker.attempted].sort(), [...keys].sort(), 'every key is attempted exactly once')
+})
+
+test('delete_r2_media attempts every key and reports a failure from the middle', async () => {
+  const keys = Array.from({ length: R2_DELETE_CONCURRENCY * 3 }, (_, i) => `${UID}/obs/${i}.webp`)
+  const failingIndex = R2_DELETE_CONCURRENCY + 5
+  const failing = keys[failingIndex]
+  const worker = gatedWorker({ [failing]: 503, [keys[2]]: 404 })
+  const done = stage('delete_r2_media').apply({ uid: UID, admin: fakeAdmin(), worker, r2Keys: new Set(keys) })
+  const result = await drain(worker, done)
+  assert.equal(result.ok, false)
+  assert.match(result.error, new RegExp(`obs/${failingIndex}\\.webp: HTTP 503`))
+  assert.equal(result.error.split('; ').length, 1, 'only the failed key is reported; 404 is success')
+  assert.doesNotMatch(result.error, new RegExp(UID), 'the account id is masked')
+  assert.deepEqual([...worker.attempted].sort(), [...keys].sort(), 'keys after the failure are still attempted')
+})
+
+test('delete_r2_media reports every failed key, in snapshot order', async () => {
+  const keys = Array.from({ length: 40 }, (_, i) => `${UID}/obs/${i}.webp`)
+  const worker = fakeWorker({ statusByKey: { [keys[3]]: 500, [keys[30]]: 502, [keys[17]]: 403 } })
+  const result = await stage('delete_r2_media').apply({ uid: UID, admin: fakeAdmin(), worker, r2Keys: new Set(keys) })
+  assert.equal(result.ok, false)
+  assert.deepEqual(result.error.split('; ').map(e => e.match(/obs\/(\d+)\.webp/)[1]), ['3', '17', '30'])
+  assert.equal(worker.deleted.length, keys.length)
+})
+
+test('delete_r2_media records a thrown worker error as a failure and keeps going', async () => {
+  const keys = Array.from({ length: 20 }, (_, i) => `${UID}/obs/${i}.webp`)
+  const attempted = []
+  const worker = {
+    async deleteKey(key) {
+      attempted.push(key)
+      if (key === keys[4]) throw new Error('socket hang up')
+      return { ok: true, status: 200 }
+    },
+  }
+  const result = await stage('delete_r2_media').apply({ uid: UID, admin: fakeAdmin(), worker, r2Keys: new Set(keys) })
+  assert.equal(result.ok, false)
+  assert.match(result.error, /obs\/4\.webp: socket hang up/)
+  assert.equal(attempted.length, keys.length)
 })
 
 test('runDeletionPlan: delete_auth_user user_not_found is idempotent success', async () => {
@@ -673,4 +804,148 @@ test('STRUCTURAL: delete_follows source uses target_type + target_id together, n
   const bareMatches = followsBlock.match(bareTargetId) || []
   assert.equal(bareMatches.length, targetIdCalls.length,
     'every follows.target_id filter must be preceded by target_type=user')
+})
+
+// ── Pagination ──────────────────────────────────────────────────────
+
+// Serves `rows` (ids 1..n) the way PostgREST does, capped at `maxRows` (the
+// server's max_rows). `pages` records the keyset cursor (`after`, the gt
+// value or null) of each request. `onPage(pageIndex, rows)` runs after a page
+// is served, so a test can change the table between page requests.
+function pagedSelect(sourceRows, { maxRows = SNAPSHOT_PAGE_SIZE, onPage } = {}) {
+  const rows = withIds(sourceRows)
+  const pages = []
+  const respond = chain => {
+    const gt = chain._filters.find(f => f.method === 'gt')
+    pages.push({ after: gt ? gt.val : null })
+    const data = serveRows(rows, chain._filters, maxRows)
+    onPage?.(pages.length - 1, rows)
+    return { data, error: null }
+  }
+  respond.paged = true
+  return { respond, pages, rows }
+}
+
+test('media_snapshot reads every observation image page, past the max_rows cap', async () => {
+  const images = Array.from({ length: 2 * SNAPSHOT_PAGE_SIZE + 5 }, (_, i) => ({
+    storage_path: `${UID}/obs/${i}.webp`,
+    original_storage_path: i % 1000 === 7 ? `${UID}/obs/orig_${i}.heic` : null,
+  }))
+  const imagePages = pagedSelect(images)
+  const admin = fakeAdmin({ tableResponses: { observation_images: { select: imagePages.respond } } })
+  const worker = fakeWorker()
+  const result = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+  assert.equal(result.ok, true)
+  const last = images.length - 1
+  assert.ok(worker.deleted.includes(`${UID}/obs/${last}.webp`), 'last page image must be deleted')
+  assert.ok(worker.deleted.includes(`${UID}/obs/thumb_${last}.webp`))
+  assert.ok(worker.deleted.includes(`${UID}/obs/orig_1007.heic`), 'originals on later pages must be deleted')
+  assert.deepEqual(imagePages.pages.map(p => p.after), [null, 1000, 2000, 2005])
+  const selects = admin._calls.filter(c => c.table === 'observation_images' && c.op === 'select')
+  for (const call of selects) {
+    assert.ok(call.filters.some(f => f.method === 'select' && /\bid\b/.test(f.arg)), 'pages must select the id cursor')
+    assert.ok(call.filters.some(f => f.method === 'order' && f.col === 'id' && f.opts?.ascending === true), 'pages must be ordered by id')
+    assert.ok(call.filters.some(f => f.method === 'limit' && f.count === SNAPSHOT_PAGE_SIZE), 'pages must be limited')
+    assert.equal(call.filters.some(f => f.method === 'range'), false, 'offset ranges skip rows deleted mid-scan')
+  }
+})
+
+test('media_snapshot keeps paging when the server max_rows is below the page size', async () => {
+  const images = Array.from({ length: 1200 }, (_, i) => ({ storage_path: `${UID}/obs/${i}.webp` }))
+  const imagePages = pagedSelect(images, { maxRows: 500 })
+  const admin = fakeAdmin({ tableResponses: { observation_images: { select: imagePages.respond } } })
+  const worker = fakeWorker()
+  const result = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+  assert.equal(result.ok, true)
+  assert.ok(worker.deleted.includes(`${UID}/obs/1199.webp`))
+  assert.deepEqual(imagePages.pages.map(p => p.after), [null, 500, 1000, 1200])
+})
+
+test('media_snapshot still collects the last row when a row is deleted between pages', async () => {
+  // One row past a full page. After the first page is served the user
+  // deletes an image they already saw; an offset scan would then start
+  // past the last row and miss it.
+  const images = Array.from({ length: SNAPSHOT_PAGE_SIZE + 1 }, (_, i) => ({ storage_path: `${UID}/obs/${i}.webp` }))
+  const imagePages = pagedSelect(images, {
+    onPage: (page, rows) => { if (page === 0) rows.splice(0, 1) },
+  })
+  const admin = fakeAdmin({ tableResponses: { observation_images: { select: imagePages.respond } } })
+  const r2Keys = new Set()
+  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys })
+  assert.equal(result.ok, true)
+  assert.ok(r2Keys.has(`${UID}/obs/${SNAPSHOT_PAGE_SIZE}.webp`), 'the row after the first page must be snapshotted')
+})
+
+test('mosaic_media_snapshot still collects the last row when a row is deleted between pages', async () => {
+  const mosaics = Array.from({ length: SNAPSHOT_PAGE_SIZE + 1 }, (_, i) => ({ storage_key: `${UID}/m/${i}.webp` }))
+  const mosaicPages = pagedSelect(mosaics, {
+    onPage: (page, rows) => { if (page === 0) rows.splice(0, 1) },
+  })
+  const admin = fakeAdmin({ tableResponses: { spore_measurement_mosaics: { select: mosaicPages.respond } } })
+  const r2Keys = new Set()
+  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys })
+  assert.equal(result.ok, true)
+  assert.ok(r2Keys.has(`${UID}/m/${SNAPSHOT_PAGE_SIZE}.webp`), 'the row after the first page must be snapshotted')
+})
+
+test('mosaic_media_snapshot reads every mosaic page', async () => {
+  const mosaics = Array.from({ length: SNAPSHOT_PAGE_SIZE + 3 }, (_, i) => ({ storage_key: `${UID}/m/${i}.webp` }))
+  const mosaicPages = pagedSelect(mosaics)
+  const admin = fakeAdmin({ tableResponses: { spore_measurement_mosaics: { select: mosaicPages.respond } } })
+  const worker = fakeWorker()
+  const result = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+  assert.equal(result.ok, true)
+  assert.ok(worker.deleted.includes(`${UID}/m/${mosaics.length - 1}.webp`))
+  assert.deepEqual(mosaicPages.pages.map(p => p.after), [null, SNAPSHOT_PAGE_SIZE, SNAPSHOT_PAGE_SIZE + 3])
+})
+
+test('delete_legacy_storage removes every file when a folder holds more than one listing page', async () => {
+  // A Storage bucket that lists sorted by name and drops removed files from
+  // later listings, like Supabase Storage.
+  const buckets = {
+    'observation-images': new Set([
+      ...Array.from({ length: 2500 }, (_, i) => `${UID}/f${String(i).padStart(5, '0')}.jpg`),
+      ...Array.from({ length: 3 }, (_, i) => `${UID}/sub/s${i}.jpg`),
+    ]),
+    avatars: new Set([`${UID}/avatar.jpg`]),
+  }
+  const storage = {
+    from: bucket => ({
+      list: async (path, { limit, offset }) => {
+        const prefix = `${path}/`
+        const entries = new Map()
+        for (const key of buckets[bucket]) {
+          if (!key.startsWith(prefix)) continue
+          const rest = key.slice(prefix.length)
+          const [head, ...tail] = rest.split('/')
+          if (tail.length) entries.set(head, { name: head, id: null })
+          else entries.set(head, { name: head, id: `id-${key}` })
+        }
+        const sorted = [...entries.values()].sort((a, b) => a.name.localeCompare(b.name))
+        return { data: sorted.slice(offset, offset + limit), error: null }
+      },
+      remove: async keys => {
+        for (const key of keys) buckets[bucket].delete(key)
+        return { data: null, error: null }
+      },
+    }),
+  }
+  const admin = fakeAdmin({ storage })
+  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set() })
+  assert.equal(result.ok, true)
+  assert.deepEqual([...buckets['observation-images']], [])
+  assert.deepEqual([...buckets.avatars], [])
+})
+
+test('media_snapshot fails closed if the server ignores the keyset filter', async () => {
+  // A select that always returns the same full page would otherwise loop forever.
+  const fullPage = withIds(Array.from({ length: SNAPSHOT_PAGE_SIZE }, (_, i) => ({ storage_path: `${UID}/obs/${i}.webp` })))
+  const respond = () => ({ data: fullPage, error: null })
+  respond.paged = true
+  const admin = fakeAdmin({ tableResponses: { observation_images: { select: respond } } })
+  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set() })
+  assert.equal(result.ok, false)
+  assert.equal(result.stage, 'media_snapshot')
+  assert.match(result.error, /page limit/)
+  assert.equal(admin._calls.some(c => c.op === 'deleteUser'), false)
 })
