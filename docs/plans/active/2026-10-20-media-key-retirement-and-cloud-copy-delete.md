@@ -772,10 +772,8 @@ Fixed on the branch, each with tests and a break-check (remove the rule, a test 
   (`private.media_key_cleared_keys`). Release and claim refuse (`key_invalid`) if a delete key is
   invalid or has a root they do not retire.
 - 5 (partly): `purged_at` never changes once set (every role), and end users (`auth.uid()` set) cannot
-  write `purged_at`, `purge_accounting_bytes`, `purge_attempted_at` or `purge_error`. Still open,
-  pre-existing on main: the finalizer debits `greatest(R2 bytes, purge_accounting_bytes,
-  stored_bytes)`, and `stored_bytes` is client-writable, so an inflated `stored_bytes` can make one
-  purge debit more than R2 removed. Decide together with finding 6 (accounting design).
+  write `purged_at`, `purge_accounting_bytes`, `purge_attempted_at` or `purge_error`. The remaining
+  part (the finalizer also counted the client-writable `stored_bytes`) is fixed with finding 6 below.
 - 7: key and owner changes on a claimed row are refused.
 - 12: one parser for `R2_PRIVATE_BUCKET_NAME` (`supabase/functions/_shared/r2Buckets.ts`). delete-account
   first checks R2 (list plus a delete-permission probe on a missing key) before the sign-out and fence.
@@ -786,7 +784,7 @@ Not changed:
   (90e545e, 07f0810). The Codex review of the fixes showed that the per-key worker pass is the only
   path that still reaches the Worker's private bucket when `R2_PRIVATE_BUCKET_NAME` wrongly says
   `none`. It stays; after the prefix delete its calls mostly return 404.
-- 6, 8, 9 (design decisions), 4 and 10 (plausible), as recorded above.
+- 4 and 10 (plausible), as recorded above. 6, 8 and 9: see the design decisions below.
 
 Codex review of the fix commits (gpt-6.2-sol): findings 3 (originals with prefix-like names), 4 (raw
 versus normalized validation) and 5 (list-only R2 token) fixed; 1 answered by the revert above; 2 is
@@ -795,3 +793,34 @@ the pre-existing `stored_bytes` debit listed under finding 5.
 Local verification after the fixes (isolated stack, Postgres 17.6.1.084): SQL 88 of 91 (the same 3
 failures as on main), §K fixture (42 cases), REST and concurrency (46 races) pass; Node 1816 pass /
 0 fail; Deno admin-ops 41, shared 3, r2Prefix 6.
+
+### Design decisions for findings 6, 8 and 9 (user decision 2026-11-21: the recommended options)
+
+- 6 and the `stored_bytes` debit (quota accounting): implemented on this branch.
+  - The sweep now debits every record except a purge with a live image row through the Worker's
+    per-key ledger (`prepare_media_object_deletion` before the delete, with the size measured in R2,
+    and `finalize_media_object_deletion` after the key is gone from every bucket). Those records
+    are a release, or a purge whose row an observation hard delete removed. The ledger keeps one
+    row per (user, key), so the sweep and the desktop's own Worker DELETE of the same key debit once
+    between them. A failed prepare deletes nothing for that key. A failed finalize, or a key left
+    in one bucket, leaves the record for the next sweep, which finalizes the kept snapshot.
+  - At most one logical image is debited per record: the first held primary key, unprefixed file
+    names first. The rule is the Worker's `isPrimaryImageKey`.
+  - A purge with a live image row keeps the purge finalizer. The finalizer and admin-ops' purge
+    snapshot and retry count only measured bytes (the R2 measurement and the server-owned
+    `purge_accounting_bytes`); `stored_bytes` no longer counts. Production check (read-only,
+    2026-11-21): no unpurged row carries a `purge_accounting_bytes` value, and the ledger has no
+    unfinalized rows.
+  - Known limit: a crash after a purge delete and before its snapshot can under-debit (the user
+    stays charged). `recalculate_profile_storage_usage` repairs it.
+- 8 (fence race): accepted. In addition, delete-account reruns the stages from `media_snapshot`
+  through `erase_media_retirements` once, after 2 s, when the erase refuses with
+  `sporely_account_not_erasable`. Other erase errors do not rerun.
+- 9 (late Worker PUT after the empty check): not on this branch; Stage 0b Worker work.
+  - The Worker checks the account-deletion marker before the write and again right after the R2
+    put, and deletes what it just wrote if the marker exists by then. A write that lands before the
+    marker is removed by the prefix delete; one that lands after is removed by the Worker itself.
+  - An admin-ops orphan-prefix sweep lists top-level `<uid>/` prefixes in each bucket and deletes
+    those with no matching account. This also cleans up crashed or abandoned runs.
+- Rollout rule: do not deploy delete-account (with this branch's stages) before the Stage 0b Worker
+  fence is live.
