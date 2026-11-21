@@ -8,10 +8,11 @@
 // STAGE ORDER (children before parents; R2 objects before DB rows; auth
 // user last):
 //
-//   0. check_r2_configuration    — list '<uid>/' once through ctx.r2 (read
-//                                   only). A missing or misconfigured R2 client
-//                                   fails here, before the sign-out and the
-//                                   write fence, so nothing is changed.
+//   0. check_r2_configuration    — list '<uid>/' once through ctx.r2 and
+//                                   probe delete permission (deleting a key
+//                                   that does not exist). A missing or
+//                                   misconfigured R2 client fails here, before
+//                                   the sign-out and the write fence.
 //   1. sign_out_everywhere       — admin.auth.admin.signOut(token, 'global').
 //   2. begin_account_deletion    — rpc begin_account_deletion: write the
 //                                   account-deletion marker (write fence).
@@ -106,6 +107,7 @@
  *   r2?: {
  *     listObjects: (prefix: string) => Promise<{ ok: boolean, objects?: Array<{ bucket: string, key: string }>, error?: string }>,
  *     deleteObjects: (objects: Array<{ bucket: string, key: string }>) => Promise<{ ok: boolean, error?: string }>,
+ *     probeDelete: (prefix: string) => Promise<{ ok: boolean, error?: string }>,
  *   },
  * }} DeletionContext
  * @typedef {{ ok: true } | { ok: false, error: string }} StageResult
@@ -197,7 +199,13 @@ export const STAGES = Object.freeze([
     name: 'check_r2_configuration',
     apply: async ctx => {
       try {
-        await listPrefix(ctx, userMediaPrefix(ctx.uid))
+        const prefix = userMediaPrefix(ctx.uid)
+        await listPrefix(ctx, prefix)
+        // List access alone is not enough: a list-only token would pass and
+        // then fail at the first delete, after the sign-out and the fence.
+        if (typeof ctx.r2.probeDelete !== 'function') throw new Error('r2 delete check is not configured')
+        const probe = await ctx.r2.probeDelete(prefix)
+        if (!probe?.ok) throw new Error(`r2 delete check failed: ${probe?.error || 'unknown'}`)
         return { ok: true }
       } catch (err) {
         return { ok: false, error: err.message }

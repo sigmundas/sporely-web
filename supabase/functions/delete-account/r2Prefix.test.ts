@@ -28,3 +28,9 @@ Deno.test('listObjects refuses a prefix that is not a directory prefix', async (
   const client = createPrefixR2Client({ ...creds, R2_PRIVATE_BUCKET_NAME: 'none' })!
   assertEquals((await client.listObjects('')).ok, false)
 })
+
+Deno.test('probeDelete refuses a prefix that is not a folder', async () => {
+  const client = createPrefixR2Client({ ...creds, R2_PRIVATE_BUCKET_NAME: 'none' })!
+  assertEquals(await client.probeDelete(''), { ok: false, error: 'invalid prefix' })
+  assertEquals(await client.probeDelete('00000000-0000-4000-8000-000000000001'), { ok: false, error: 'invalid prefix' })
+})

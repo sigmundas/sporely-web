@@ -67,5 +67,23 @@ export function createPrefixR2Client(env: Record<string, string | undefined>) {
         return { ok: false, error: (error as Error)?.name || 'delete failed' }
       }
     },
+    // Delete permission check without side effects: deleting a key that does
+    // not exist succeeds in S3/R2 when the token may delete, and fails with
+    // AccessDenied for a list-only token.
+    async probeDelete(prefix: string) {
+      if (!prefix || !prefix.endsWith('/')) return { ok: false, error: 'invalid prefix' }
+      try {
+        for (const bucket of buckets) {
+          const result = await client.send(new DeleteObjectsCommand({
+            Bucket: bucket,
+            Delete: { Objects: [{ Key: `${prefix}.sporely-delete-probe` }], Quiet: true },
+          }))
+          if (result.Errors?.length) return { ok: false, error: `delete not permitted in ${bucket}` }
+        }
+        return { ok: true }
+      } catch (error) {
+        return { ok: false, error: (error as Error)?.name || 'delete check failed' }
+      }
+    },
   }
 }

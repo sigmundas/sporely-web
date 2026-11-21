@@ -274,6 +274,11 @@ function fakeR2(initial = {}, options = {}) {
       }
       return { ok: true, objects }
     },
+    async probeDelete(prefix) {
+      log.push(`probe:${prefix}`)
+      if (options.probeError) return { ok: false, error: options.probeError }
+      return { ok: true }
+    },
     async deleteObjects(objects) {
       log.push(`delete:${objects.length}`)
       if (options.deleteError) return { ok: false, error: options.deleteError }
@@ -900,6 +905,23 @@ test('an R2 listing error or a missing R2 client fails before the sign-out and t
   }
 })
 
+
+test('a list-only R2 token fails the delete check before the sign-out and the fence', async () => {
+  const admin = fakeAdmin()
+  let signedOut = false
+  const r2 = fakeR2({ legacy: [`${UID}/a.webp`] }, { probeError: 'delete not permitted in sporely-media' })
+  const result = await runDeletionPlan({
+    uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2,
+    signOutEverywhere: async () => { signedOut = true; return { error: null } },
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.stage, 'check_r2_configuration')
+  assert.match(result.error, /delete check failed/)
+  assert.equal(signedOut, false)
+  assert.equal(admin._calls.length, 0)
+  assert.deepEqual(r2.log, [`list:${UID}/`, `probe:${UID}/`])
+  assert.deepEqual([...r2.buckets.legacy], [`${UID}/a.webp`])
+})
 test('a non-uuid account id never produces a prefix (cannot widen to a whole bucket)', async () => {
   const r2 = fakeR2({ legacy: ['x/a.webp'] })
   const result = await runDeletionPlan({ uid: '', admin: fakeAdmin(), worker: fakeWorker(), r2Keys: new Set(), r2, signOutEverywhere: SIGN_OUT })
