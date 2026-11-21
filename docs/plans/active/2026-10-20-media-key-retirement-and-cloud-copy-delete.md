@@ -796,26 +796,31 @@ failures as on main), §K fixture (42 cases), REST and concurrency (46 races) pa
 
 ### Design decisions for findings 6, 8 and 9 (user decision 2026-11-21: the recommended options)
 
-- 6 and the `stored_bytes` debit (quota accounting): implemented on this branch.
-  - The sweep now debits every record except a purge with a live image row through the Worker's
-    per-key ledger (`prepare_media_object_deletion` before the delete, with the size measured in R2,
-    and `finalize_media_object_deletion` after the key is gone from every bucket). Those records
-    are a release, or a purge whose row an observation hard delete removed. The ledger keeps one
-    row per (user, key), so the sweep and the desktop's own Worker DELETE of the same key debit once
-    between them. A failed prepare deletes nothing for that key. A failed finalize, or a key left
-    in one bucket, leaves the record for the next sweep, which finalizes the kept snapshot.
-  - At most one logical image is debited per record: the first held primary key, unprefixed file
-    names first. The rule is the Worker's `isPrimaryImageKey`.
-  - A purge with a live image row keeps the purge finalizer. The finalizer and admin-ops' purge
-    snapshot and retry count only measured bytes (the R2 measurement and the server-owned
-    `purge_accounting_bytes`); `stored_bytes` no longer counts. Production check (read-only,
-    2026-11-21): no unpurged row carries a `purge_accounting_bytes` value, and the ledger has no
-    unfinalized rows.
-  - Known limit: a crash after a purge delete and before its snapshot can under-debit (the user
-    stays charged). `recalculate_profile_storage_usage` repairs it.
+- 6 and the `stored_bytes` debit (quota accounting): implemented on this branch, revised after the
+  Codex review of the first version (findings 1-5 of that review).
+  - Every key a purge or the sweep deletes is debited through the Worker's per-key ledger
+    (`prepare_media_object_deletion` before the delete, with the size measured in R2, and
+    `finalize_media_object_deletion` after the key is gone from every bucket). This covers releases
+    and purges alike. The ledger keeps one row per (user, key), so admin-ops and a Worker DELETE of
+    the same key (the desktop's release cleanup, or the web hard delete of a tombstoned image)
+    debit once between them.
+  - A finalized ledger entry of a retired key is never re-opened (migration section 13), so two
+    deletes that both measured the object before either deleted it still debit once.
+  - A failed prepare deletes nothing for that key. A failed finalize, or a key left in one bucket,
+    leaves the record for the next sweep, which finalizes the kept snapshot of each key.
+  - The image is debited only on the family's unprefixed primary key, when it is held (the Worker's
+    `isPrimaryImageKey` rule without `small_`/`medium_`/`cards_`/`preview_` copies).
+  - `finalize_observation_image_purge` only marks the row purged and records the measured bytes
+    (never `stored_bytes`); it no longer debits. Production check (read-only, 2026-11-21): no
+    unpurged row carries a `purge_accounting_bytes` value, and the ledger has no unfinalized rows.
+  - Known limits, both in the safe direction (the user stays charged) and repaired by
+    `recalculate_profile_storage_usage`: a tombstone whose primary object is already missing in R2
+    keeps its image count, and an admin-ops purge run by the old code against the new finalizer
+    would debit nothing.
 - 8 (fence race): accepted. In addition, delete-account reruns the stages from `media_snapshot`
   through `erase_media_retirements` once, after 2 s, when the erase refuses with
-  `sporely_account_not_erasable`. Other erase errors do not rerun.
+  `sporely_account_not_erasable`. Other erase errors do not rerun. The rerun forgets the first
+  pass's keys, so it sends Worker DELETEs only for rows that appeared since.
 - 9 (late Worker PUT after the empty check): not on this branch; Stage 0b Worker work.
   - The Worker checks the account-deletion marker before the write and again right after the R2
     put, and deletes what it just wrote if the marker exists by then. A write that lands before the
