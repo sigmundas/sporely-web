@@ -38,15 +38,12 @@
 //                                   covers released images (NULL paths), late
 //                                   Worker writes and every variant without
 //                                   guessing.
-//   7. delete_r2_media           — ask the upload worker to delete each
-//                                   snapshotted key OUTSIDE '<uid>/' (legacy
-//                                   keys the prefix delete cannot reach), at
-//                                   most R2_DELETE_CONCURRENCY at once. 404 =
-//                                   success. Keys under '<uid>/' were already
-//                                   removed by step 6 in every bucket, so they
-//                                   are not sent again; the worker refuses keys
-//                                   outside the caller's prefix, so a legacy key
-//                                   stops the run before any row is deleted.
+//   7. delete_r2_media           — delete each snapshotted R2 media object
+//                                   (observation, mosaic and calibration
+//                                   keys), at most R2_DELETE_CONCURRENCY at
+//                                   once. 404 = success. The upload worker
+//                                   attempts both the legacy public bucket
+//                                   AND the private bucket for each key.
 //   8. delete_legacy_storage     — legacy Supabase Storage folders
 //                                   (observation-images/${uid}, avatars/${uid}).
 //   9. scrub_mentions            — remove ONLY the deleted uid from
@@ -354,14 +351,7 @@ export const STAGES = Object.freeze([
       // in snapshot order once all deletes have settled.
       /** @type {(string | undefined)[]} */
       const failures = []
-      let prefix
-      try {
-        prefix = userMediaPrefix(ctx.uid)
-      } catch (err) {
-        return { ok: false, error: err.message }
-      }
-      const outsidePrefix = [...ctx.r2Keys].filter(key => !key.startsWith(prefix))
-      await forEachWithConcurrency(outsidePrefix, R2_DELETE_CONCURRENCY, async (key, index) => {
+      await forEachWithConcurrency(ctx.r2Keys, R2_DELETE_CONCURRENCY, async (key, index) => {
         let outcome
         try {
           outcome = await ctx.worker.deleteKey(key)
