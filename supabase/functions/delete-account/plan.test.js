@@ -19,6 +19,7 @@ const SIGN_OUT = async () => ({ error: null })
 // ── Structural: every stage matches the audited deletion order ────────
 
 const EXPECTED_ORDER = [
+  'check_r2_configuration',
   'sign_out_everywhere',
   'begin_account_deletion',
   'media_snapshot',
@@ -883,15 +884,20 @@ test('a non-empty prefix after the second pass stops the run before erasure, pro
   assert.equal(admin._calls.some(c => c.table === 'profiles'), false)
 })
 
-test('verify_r2_prefix_empty fails on a listing error, and a missing R2 client fails closed', async () => {
-  const admin = fakeAdmin()
-  const failing = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2({}, { listError: 'denied' }), signOutEverywhere: SIGN_OUT })
-  assert.equal(failing.ok, false)
-  assert.equal(failing.stage, 'delete_r2_prefix')
-  const missing = await runDeletionPlan({ uid: UID, admin: fakeAdmin(), worker: fakeWorker(), r2Keys: new Set(), signOutEverywhere: SIGN_OUT })
-  assert.equal(missing.ok, false)
-  assert.equal(missing.stage, 'delete_r2_prefix')
-  assert.match(missing.error, /not configured/)
+test('an R2 listing error or a missing R2 client fails before the sign-out and the fence', async () => {
+  for (const r2 of [fakeR2({}, { listError: 'denied' }), undefined]) {
+    const admin = fakeAdmin()
+    let signedOut = false
+    const result = await runDeletionPlan({
+      uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2,
+      signOutEverywhere: async () => { signedOut = true; return { error: null } },
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.stage, 'check_r2_configuration')
+    assert.equal(signedOut, false, 'no sign-out before the R2 check passes')
+    assert.equal(admin._calls.length, 0, 'no fence, snapshot or delete before the R2 check passes')
+    if (!r2) assert.match(result.error, /not configured/)
+  }
 })
 
 test('a non-uuid account id never produces a prefix (cannot widen to a whole bucket)', async () => {
@@ -936,7 +942,7 @@ test('an erasure refusal (content still present) stops before profile and auth d
   assert.equal(admin._calls.some(c => c.op === 'deleteUser'), false)
 })
 
-test('global sign-out runs first; a sign-out failure stops before any erasure', async () => {
+test('global sign-out runs before any erasure; a sign-out failure stops it', async () => {
   const order = []
   const admin = fakeAdmin()
   const r2 = fakeR2({ legacy: [`${UID}/a.webp`] })

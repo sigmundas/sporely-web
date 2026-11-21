@@ -8,6 +8,10 @@
 // STAGE ORDER (children before parents; R2 objects before DB rows; auth
 // user last):
 //
+//   0. check_r2_configuration    — list '<uid>/' once through ctx.r2 (read
+//                                   only). A missing or misconfigured R2 client
+//                                   fails here, before the sign-out and the
+//                                   write fence, so nothing is changed.
 //   1. sign_out_everywhere       — admin.auth.admin.signOut(token, 'global').
 //   2. begin_account_deletion    — rpc begin_account_deletion: write the
 //                                   account-deletion marker (write fence).
@@ -186,6 +190,20 @@ function lastRowId(label, rows) {
 
 /** @type {readonly Stage[]} */
 export const STAGES = Object.freeze([
+  {
+    // Before anything changes: the prefix erasure needs a configured R2
+    // client with list access. A failure here leaves the account untouched
+    // (no sign-out, no fence).
+    name: 'check_r2_configuration',
+    apply: async ctx => {
+      try {
+        await listPrefix(ctx, userMediaPrefix(ctx.uid))
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: err.message }
+      }
+    },
+  },
   {
     // Revoke every session of the account first (global sign-out), so no
     // other device keeps writing while the account is erased. A partial
