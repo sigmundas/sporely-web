@@ -711,15 +711,37 @@ export function renderIdentifyRedlistSummary(prediction = {}) {
   `
 }
 
+// Species links can come from identification rows written by another user
+// (the community view passes `species_url` through unchanged), so a stored
+// URL is only rendered when it is https on a known provider host. This keeps
+// `javascript:` URLs and app-origin paths (such as Capacitor's internal
+// `/_capacitor_http_interceptor_` proxy) out of the rendered link.
+const SPECIES_LINK_HOSTS = ['artsdatabanken.no', 'inaturalist.org']
+
+function _isAllowedSpeciesLinkUrl(value) {
+  if (typeof value !== 'string' || !value) return false
+  let url
+  try {
+    url = new URL(value)
+  } catch (_) {
+    return false
+  }
+  if (url.protocol !== 'https:') return false
+  if (url.username || url.password || url.port) return false
+  const host = url.hostname.toLowerCase()
+  return SPECIES_LINK_HOSTS.some(allowed => host === allowed || host.endsWith(`.${allowed}`))
+}
+
 function _getPredictionSpeciesLinkUrl(prediction = {}) {
   const service = normalizeIdentifyService(prediction.service)
-  const speciesUrl = _normalizeNullableText(
+  const rawSpeciesUrl = _normalizeNullableText(
     prediction.speciesUrl
     ?? prediction.species_url
     ?? prediction.adbUrl
     ?? prediction.url
     ?? prediction.href
   )
+  const speciesUrl = _isAllowedSpeciesLinkUrl(rawSpeciesUrl) ? rawSpeciesUrl : null
   if (service === ID_SERVICE_ARTSORAKEL && speciesUrl) {
     return speciesUrl
   }
