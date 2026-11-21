@@ -759,3 +759,39 @@ Plausible:
    To settle: are any of the 21 tombstones that a purge would claim?
 10. Prefix erasure versus foreign-prefix legacy rows: production precheck 2 is 0 in all eight
    columns, so it does not apply today. Keep precheck 2 a strict zero gate (drop "accepted rows").
+
+### Fix status of the Codex challenge findings (2026-11-21)
+
+Fixed on the branch, each with tests and a break-check (remove the rule, a test fails, restore):
+- 1 and 2: `media_key_is_valid` refuses control characters, `//`, whitespace at the start or end of
+  the key or any segment (judged on the raw value; the guard now validates raw values), and, outside
+  `originals/`, prefix-only filenames and non-lowercase variant prefixes. admin-ops refuses any claimed
+  or swept key its R2 client would rewrite (`canonicalDeleteKeys`) and deletes nothing for that row.
+  The Worker must apply the same key rule in Stage 0b (fixture field `valid`).
+- 3: the measurement and cover keys a release or claim clears are added to `delete_keys`
+  (`private.media_key_cleared_keys`). Release and claim refuse (`key_invalid`) if a delete key is
+  invalid or has a root they do not retire.
+- 5 (partly): `purged_at` never changes once set (every role), and end users (`auth.uid()` set) cannot
+  write `purged_at`, `purge_accounting_bytes`, `purge_attempted_at` or `purge_error`. Still open,
+  pre-existing on main: the finalizer debits `greatest(R2 bytes, purge_accounting_bytes,
+  stored_bytes)`, and `stored_bytes` is client-writable, so an inflated `stored_bytes` can make one
+  purge debit more than R2 removed. Decide together with finding 6 (accounting design).
+- 7: key and owner changes on a claimed row are refused.
+- 12: one parser for `R2_PRIVATE_BUCKET_NAME` (`supabase/functions/_shared/r2Buckets.ts`). delete-account
+  first checks R2 (list plus a delete-permission probe on a missing key) before the sign-out and fence.
+- 13: partial index on `observation_images.purge_retirement_id`.
+
+Not changed:
+- 11 (per-key worker deletes after the prefix delete): a fix was committed and then reverted
+  (90e545e, 07f0810). The Codex review of the fixes showed that the per-key worker pass is the only
+  path that still reaches the Worker's private bucket when `R2_PRIVATE_BUCKET_NAME` wrongly says
+  `none`. It stays; after the prefix delete its calls mostly return 404.
+- 6, 8, 9 (design decisions), 4 and 10 (plausible), as recorded above.
+
+Codex review of the fix commits (gpt-6.2-sol): findings 3 (originals with prefix-like names), 4 (raw
+versus normalized validation) and 5 (list-only R2 token) fixed; 1 answered by the revert above; 2 is
+the pre-existing `stored_bytes` debit listed under finding 5.
+
+Local verification after the fixes (isolated stack, Postgres 17.6.1.084): SQL 88 of 91 (the same 3
+failures as on main), §K fixture (42 cases), REST and concurrency (46 races) pass; Node 1816 pass /
+0 fail; Deno admin-ops 41, shared 3, r2Prefix 6.
