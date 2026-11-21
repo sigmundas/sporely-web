@@ -1010,6 +1010,40 @@ BEGIN
   PERFORM pg_temp.eq(pg_temp.run('postgres', NULL, format('INSERT INTO public.calibrations (user_id, objective_key, calibration_date, microns_per_pixel, image_storage_path) VALUES (%L, %L, current_date, 1, %L)', a, 'erx', a || '/c/x.webp')) LIKE 'ERR:23503:%', true, 'no row can carry the erased uid');
 END $$;
 
+-- Deletion ledger: a finalized entry of a retired key stays finalized, so two
+-- deletes that both measured the object (sweep and Worker) debit it once. A
+-- key that is not retired can still be re-opened (upload again after delete).
+DO $$
+DECLARE
+  b text := pg_temp.fx('B');
+  v_retired text;
+  v_live text := pg_temp.fx('B') || '/ledger-live/x.webp';
+BEGIN
+  SELECT key_root INTO v_retired
+    FROM private.retired_media_key_roots WHERE user_id = b::uuid ORDER BY key_root LIMIT 1;
+  PERFORM pg_temp.eq(public.media_key_is_retired(b::uuid, v_retired), true, 'ledger fixture key is retired');
+  PERFORM pg_temp.eq(public.media_key_is_retired(b::uuid, v_live), false, 'ledger fixture live key is not retired');
+  UPDATE public.profiles SET total_storage_bytes = 1000, storage_used_bytes = 1000, image_count = 3 WHERE id = b::uuid;
+
+  PERFORM public.prepare_media_object_deletion(b::uuid, v_retired, 100, 1);
+  PERFORM public.finalize_media_object_deletion(b::uuid, v_retired);
+  PERFORM public.prepare_media_object_deletion(b::uuid, v_retired, 100, 1);
+  PERFORM pg_temp.eq((SELECT finalized_at IS NOT NULL FROM public.media_object_deletion_accounting WHERE user_id = b::uuid AND storage_key = v_retired), true, 'retired key: a late prepare keeps the entry finalized');
+  PERFORM public.finalize_media_object_deletion(b::uuid, v_retired);
+  PERFORM pg_temp.eq((SELECT row(total_storage_bytes, image_count)::text FROM public.profiles WHERE id = b::uuid), '(900,2)', 'retired key debited once');
+
+  PERFORM public.prepare_media_object_deletion(b::uuid, v_live, 50, 0);
+  PERFORM public.finalize_media_object_deletion(b::uuid, v_live);
+  PERFORM public.prepare_media_object_deletion(b::uuid, v_live, 50, 0);
+  PERFORM pg_temp.eq((SELECT finalized_at IS NULL FROM public.media_object_deletion_accounting WHERE user_id = b::uuid AND storage_key = v_live), true, 'live key: a measured prepare re-opens the entry');
+  PERFORM public.finalize_media_object_deletion(b::uuid, v_live);
+  PERFORM pg_temp.eq((SELECT total_storage_bytes FROM public.profiles WHERE id = b::uuid), 800::bigint, 'live key re-upload debited again');
+
+  -- A zero-byte prepare (object already gone) never re-opens either kind.
+  PERFORM public.prepare_media_object_deletion(b::uuid, v_live, 0, 0);
+  PERFORM pg_temp.eq((SELECT finalized_at IS NOT NULL FROM public.media_object_deletion_accounting WHERE user_id = b::uuid AND storage_key = v_live), true, 'zero-byte prepare keeps finalized');
+END $$;
+
 SELECT pg_temp.eq((SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'observation_images_purge_retirement_id_idx'), 1::bigint, 'purge_retirement_id FK index');
 SELECT pg_temp.eq((SELECT string_agg(DISTINCT tgenabled::text, ',') FROM pg_trigger
                     WHERE tgname IN ('zzy_media_key_retirement_guard', 'media_key_retirements_immutable', 'media_key_retirements_no_truncate',
