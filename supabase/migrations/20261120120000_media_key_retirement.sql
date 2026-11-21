@@ -207,17 +207,19 @@ $$;
 
 -- §K key syntax: refuse '.' / '..' segments, ANY '%' (every percent
 -- encoding, e.g. %2F, %5C, %2e) and a literal backslash. Also refuse every
--- form the other readers normalize differently, so SQL, admin-ops (JS trim)
--- and the Worker (strips control characters' keys, collapses empty segments)
--- always name the same object:
+-- form another reader would turn into a different object name, so SQL,
+-- admin-ops (JS trim) and the Worker (refuses control characters, trims,
+-- drops empty segments) always name the same object:
 --   * control characters (C0, DEL, C1) anywhere;
 --   * an empty segment ('//');
---   * leading or trailing whitespace that JS String.prototype.trim removes
---     but btrim(text) keeps (Unicode space separators, BOM);
---   * a filename made only of variant prefixes ('small_'): its Worker-derived
---     thumbnail would have another root;
---   * a variant prefix in any other spelling than lowercase ('SMALL_f'): the
---     web client strips prefixes case-insensitively.
+--   * whitespace at the start or end of the key or of any segment
+--     (checked on the raw value, so a key and its normalized form are
+--     judged alike, e.g. '<uid>/x/f.webp /');
+--   * outside 'originals/': a filename made only of variant prefixes
+--     ('small_'), whose Worker-derived thumbnail would have another root,
+--     and a variant prefix not spelled in lowercase ('SMALL_f'), which the
+--     web client strips case-insensitively. Originals are standalone (their
+--     family is the key itself) and keep the desktop's source filename case.
 -- The Worker must apply the same rule (Stage 0b).
 CREATE FUNCTION private.media_key_is_valid(p_key text)
 RETURNS boolean
@@ -233,11 +235,12 @@ AS $$
     OR pg_catalog.strpos(s.n, E'\\') > 0
     OR s.n ~ '[\x01-\x1f\x7f-\x9f]'
     OR pg_catalog.strpos(s.n, '//') > 0
-    OR s.n ~ '^[    -     　﻿]'
-    OR s.n ~ '[    -     　﻿]$'
-    OR s.f ~ '^(thumb_|small_|medium_|cards_|preview_)+$'
-    OR pg_catalog.regexp_replace(s.f, '^(thumb_|small_|medium_|cards_|preview_)+', '', 'i')
-       <> pg_catalog.regexp_replace(s.f, '^(thumb_|small_|medium_|cards_|preview_)+', '')
+    OR p_key ~ '(^|/)[ \t\n\r\f\v\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]'
+    OR p_key ~ '[ \t\n\r\f\v\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]($|/)'
+    OR (NOT ('originals' = ANY (pg_catalog.string_to_array(s.n, '/')))
+        AND (s.f ~ '^(thumb_|small_|medium_|cards_|preview_)+$'
+             OR pg_catalog.regexp_replace(s.f, '^(thumb_|small_|medium_|cards_|preview_)+', '', 'i')
+                <> pg_catalog.regexp_replace(s.f, '^(thumb_|small_|medium_|cards_|preview_)+', '')))
   )
   FROM (SELECT n, pg_catalog.regexp_replace(n, '^.*/', '') AS f
           FROM (SELECT NULLIF(pg_catalog.btrim(pg_catalog.btrim(p_key), '/'), '') AS n) t) s
@@ -510,6 +513,7 @@ DECLARE
   v_val text;
   v_keys text[] := ARRAY[]::text[];
   v_changed text[] := ARRAY[]::text[];
+  v_changed_raw text[] := ARRAY[]::text[];
   v_roots text[];
   v_restore boolean := false;
   v_claim_change boolean := false;
@@ -607,6 +611,7 @@ BEGIN
        AND (TG_OP = 'INSERT' OR (v_new -> v_col) IS DISTINCT FROM (v_old -> v_col)
             OR (v_new -> 'user_id') IS DISTINCT FROM (v_old -> 'user_id')) THEN
       v_changed := v_changed || v_val;
+      v_changed_raw := v_changed_raw || (v_new ->> v_col);
     END IF;
   END LOOP;
 
@@ -628,11 +633,15 @@ BEGIN
   -- foreign key neither waits on nor reveals another owner's retirement
   -- state: it always gets this one refusal. Release, claim and sweep also
   -- ignore any legacy reference whose owner does not own the key's prefix.
-  FOREACH v_val IN ARRAY v_changed LOOP
+  -- Validity is judged on the stored (raw) value, exactly as release and
+  -- claim judge it later.
+  FOREACH v_val IN ARRAY v_changed_raw LOOP
     IF NOT private.media_key_is_valid(v_val) THEN
       RAISE EXCEPTION 'This media key is not a valid Sporely storage key. Nothing was changed in the cloud.'
         USING ERRCODE = 'P0001', HINT = 'sporely_media_key_invalid';
     END IF;
+  END LOOP;
+  FOREACH v_val IN ARRAY v_changed LOOP
     IF (v_new ->> 'user_id') IS NULL OR NOT pg_catalog.starts_with(v_val, (v_new ->> 'user_id') || '/') THEN
       RAISE EXCEPTION 'A media key must live under the row owner''s storage prefix. Nothing was changed in the cloud.'
         USING ERRCODE = '42501', HINT = 'sporely_media_key_foreign';
