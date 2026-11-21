@@ -24,6 +24,13 @@
          permission; remove it so Play Console does not flag the app as using ads. -->
     <uses-permission android:name="com.google.android.gms.permission.AD_ID" tools:node="remove" />
 
+    <!-- The portrait screenOrientation on MainActivity and NativeCameraActivity
+         implies a required android.hardware.screen.portrait feature, so Play
+         hides the app from devices without portrait (some Chromebooks, Android
+         XR). The lock is a preference, not a requirement: Android 16 already
+         ignores it on large screens for targetSdk 36. -->
+    <uses-feature android:name="android.hardware.screen.portrait" android:required="false" />
+
     <!-- Android 11+ package visibility: NativeCameraPlugin.openSystemCamera()
          checks resolveActivity() for IMAGE_CAPTURE, which returns null for a
          camera app that is not declared here, so the system camera was never
