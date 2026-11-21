@@ -198,21 +198,21 @@ INSERT INTO public.observation_images (observation_id, user_id, image_type, stor
 SELECT (SELECT v FROM fx WHERE k = 'oC'), '00000000-0000-4000-8000-00000005b002', t.image_type, t.path, t.fname,
        t.bytes, t.did, t.key
   FROM (VALUES
-    ('field', 'p/a.webp', 'a.jpg', NULL::bigint, 301, NULL::uuid),                              -- keyless, desktop
-    ('field', 'p/b.webp', 'b.jpg', NULL, NULL, NULL),                                           -- keyless, other
-    ('field', 'p/c.webp', 'c.jpg', NULL, 303, gen_random_uuid()),                               -- keyed + desktop_id
+    ('field', '00000000-0000-4000-8000-00000005b002/p/a.webp', 'a.jpg', NULL::bigint, 301, NULL::uuid),                              -- keyless, desktop
+    ('field', '00000000-0000-4000-8000-00000005b002/p/b.webp', 'b.jpg', NULL, NULL, NULL),                                           -- keyless, other
+    ('field', '00000000-0000-4000-8000-00000005b002/p/c.webp', 'c.jpg', NULL, 303, gen_random_uuid()),                               -- keyed + desktop_id
     ('field', ' ', 'd.jpg', 40, NULL, gen_random_uuid()),                                       -- bytes, blank path, field
     ('microscope', NULL, 'e.jpg', 50, NULL, gen_random_uuid()),                                 -- bytes, no path, microscope anchor
-    ('field', 'p/s1.webp', NULL, NULL, NULL, '00000000-0000-4000-8000-0000005b4ed1'::uuid),     -- shared_key
-    ('field', 'p/s2.webp', NULL, NULL, NULL, '00000000-0000-4000-8000-0000005b4ed1'::uuid),     -- shared_key
-    ('field', 'p/t1.webp', 't.jpg', NULL, NULL, gen_random_uuid()),                             -- twin keyed
-    ('field', 'p/t2.webp', 't.jpg', NULL, NULL, NULL)                                           -- twin keyless (also "other")
+    ('field', '00000000-0000-4000-8000-00000005b002/p/s1.webp', NULL, NULL, NULL, '00000000-0000-4000-8000-0000005b4ed1'::uuid),     -- shared_key
+    ('field', '00000000-0000-4000-8000-00000005b002/p/s2.webp', NULL, NULL, NULL, '00000000-0000-4000-8000-0000005b4ed1'::uuid),     -- shared_key
+    ('field', '00000000-0000-4000-8000-00000005b002/p/t1.webp', 't.jpg', NULL, NULL, gen_random_uuid()),                             -- twin keyed
+    ('field', '00000000-0000-4000-8000-00000005b002/p/t2.webp', 't.jpg', NULL, NULL, NULL)                                           -- twin keyless (also "other")
   ) AS t(image_type, path, fname, bytes, did, key);
-WITH x AS (SELECT id FROM public.observation_images WHERE storage_path = 'p/c.webp')
+WITH x AS (SELECT id FROM public.observation_images WHERE storage_path = '00000000-0000-4000-8000-00000005b002/p/c.webp')
 INSERT INTO fx SELECT 'iC', id FROM x;
 -- 205 more keyless "other" images on oB to exercise the 200 cap.
 INSERT INTO public.observation_images (observation_id, user_id, image_type, storage_path)
-SELECT (SELECT v FROM fx WHERE k = 'oB'), '00000000-0000-4000-8000-00000005b002', 'field', 'p/bulk' || g || '.webp'
+SELECT (SELECT v FROM fx WHERE k = 'oB'), '00000000-0000-4000-8000-00000005b002', 'field', '00000000-0000-4000-8000-00000005b002/p/bulk' || g || '.webp'
   FROM generate_series(1, 205) g;
 
 -- Measurements on iC: shared_key pair, twin pair, keyed + desktop_id.
