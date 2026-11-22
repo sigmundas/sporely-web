@@ -266,18 +266,73 @@ function _httpErrorMessage(label, response, payload) {
   return `${label} failed: ${statusPart}${bodyPart}`
 }
 
+// The debug dashboard keeps recorded response bodies in page memory and shows
+// them on screen. OAuth and profile responses carry credentials (access,
+// refresh and API tokens), so redact every credential-like field before
+// recording. Non-JSON bodies are not recorded, because a token could appear
+// anywhere in them.
+const INAT_DEBUG_REDACTED = '[redacted]'
+const INAT_DEBUG_SECRET_KEY = /token|secret|password|authorization|^code$|^jwt$/i
+
+// Collect the string values of credential-named fields, so a copy of a secret
+// echoed in another field (an error message, say) is scrubbed too.
+function _collectInatDebugSecrets(value, secrets, depth = 0) {
+  if (!value || typeof value !== 'object' || depth > 8) return secrets
+  for (const [key, item] of Object.entries(value)) {
+    if (INAT_DEBUG_SECRET_KEY.test(key) && typeof item === 'string' && item.length >= 6) {
+      secrets.add(item.replace(/^Bearer\s+/i, ''))
+    } else {
+      _collectInatDebugSecrets(item, secrets, depth + 1)
+    }
+  }
+  return secrets
+}
+
+function _redactInatDebugValue(value, secrets, depth) {
+  if (value === null || value === undefined) return value
+  if (typeof value === 'string') {
+    if (depth === 0) return INAT_DEBUG_REDACTED
+    let out = value
+    for (const secret of secrets) out = out.split(secret).join(INAT_DEBUG_REDACTED)
+    return out
+  }
+  if (typeof value !== 'object') return value
+  if (depth > 8) return INAT_DEBUG_REDACTED
+  if (Array.isArray(value)) return value.map(item => _redactInatDebugValue(item, secrets, depth + 1))
+  const out = {}
+  for (const [key, item] of Object.entries(value)) {
+    out[key] = INAT_DEBUG_SECRET_KEY.test(key)
+      ? INAT_DEBUG_REDACTED
+      : _redactInatDebugValue(item, secrets, depth + 1)
+  }
+  return out
+}
+
+export function redactInaturalistDebugBody(value, { knownSecrets = [] } = {}) {
+  const secrets = _collectInatDebugSecrets(value, new Set())
+  for (const secret of knownSecrets) {
+    const text = String(secret || '').trim()
+    if (text.length >= 6) secrets.add(text)
+  }
+  return _redactInatDebugValue(value, secrets, 0)
+}
+
+function _recordInatDebugResponse(label, endpoint, response, payload) {
+  recordDebugJsonResponse({
+    source: 'inaturalist',
+    label,
+    endpoint,
+    status: response.status,
+    ok: response.ok,
+    body: redactInaturalistDebugBody(payload),
+  })
+}
+
 async function _fetchJson(fetchImpl, url, options = {}) {
   const { label, ...fetchOptions } = options || {}
   const response = await fetchImpl(url, fetchOptions)
   const payload = await _responseBody(response)
-  recordDebugJsonResponse({
-    source: 'inaturalist',
-    label: label || String(url),
-    endpoint: String(url),
-    status: response.status,
-    ok: response.ok,
-    body: payload,
-  })
+  _recordInatDebugResponse(label || String(url), String(url), response, payload)
   if (!response.ok) {
     throw new Error(_httpErrorMessage(label || url, response, payload))
   }
@@ -530,14 +585,7 @@ async function _fetchUserProfileWithOauthAccessToken(accessToken, fetchImpl = _d
     },
   })
   const payload = await _responseBody(response)
-  recordDebugJsonResponse({
-    source: 'inaturalist',
-    label: INAT_USER_PROFILE_URL,
-    endpoint: INAT_USER_PROFILE_URL,
-    status: response.status,
-    ok: response.ok,
-    body: payload,
-  })
+  _recordInatDebugResponse(INAT_USER_PROFILE_URL, INAT_USER_PROFILE_URL, response, payload)
   _debugInatOAuth('profile fetch completed', {
     url: INAT_USER_PROFILE_URL,
     status: response.status,
@@ -562,14 +610,7 @@ export async function fetchInaturalistProfileWithApiToken(apiToken, fetchImpl = 
     },
   })
   const payload = await _responseBody(response)
-  recordDebugJsonResponse({
-    source: 'inaturalist',
-    label: INAT_USER_PROFILE_URL,
-    endpoint: INAT_USER_PROFILE_URL,
-    status: response.status,
-    ok: response.ok,
-    body: payload,
-  })
+  _recordInatDebugResponse(INAT_USER_PROFILE_URL, INAT_USER_PROFILE_URL, response, payload)
   _debugInatOAuth('profile fetch with api token completed', {
     url: INAT_USER_PROFILE_URL,
     status: response.status,
@@ -594,14 +635,7 @@ export async function fetchInaturalistApiToken(accessToken, fetchImpl = _default
     },
   })
   const payload = await _responseBody(response)
-  recordDebugJsonResponse({
-    source: 'inaturalist',
-    label: INAT_API_TOKEN_URL,
-    endpoint: INAT_API_TOKEN_URL,
-    status: response.status,
-    ok: response.ok,
-    body: payload,
-  })
+  _recordInatDebugResponse(INAT_API_TOKEN_URL, INAT_API_TOKEN_URL, response, payload)
   _debugInatOAuth('api token fetch completed', {
     url: INAT_API_TOKEN_URL,
     status: response.status,

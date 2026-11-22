@@ -1,5 +1,5 @@
 import { t } from './i18n.js'
-import { loadInaturalistSession } from './inaturalist.js'
+import { loadInaturalistSession, redactInaturalistDebugBody } from './inaturalist.js'
 import { getBlobImageDimensions, prepareImageBlobForUpload } from './image_crop.js'
 import { isBlob } from './observation-shapes.js'
 import { isDebugScreenEnabled, recordDebugJsonResponse, revokeDebugObjectUrl } from './debug-activity.js'
@@ -439,7 +439,7 @@ async function _runInaturalistSuggestion(blob, lang = 'en', options = {}) {
     endpoint: INAT_SUGGEST_URL,
     status: response.status,
     ok: response.ok,
-    body: payload,
+    body: redactInaturalistDebugBody(payload, { knownSecrets: [apiToken] }),
     fieldName: 'image',
     imageIndex: Number(options.imageIndex || 0),
     imageCount: Number(options.totalImages || 1),
