@@ -672,3 +672,15 @@ test('T10 an aborted queue commit rejects and nothing is queued', async () => {
   await assert.rejects(enqueueObservation({ user_id: 'test-user' }, []), { name: 'QuotaExceededError' })
   assert.equal(idb.records('sporely_sync').length, 0)
 })
+
+test('T10 queue operations close their IndexedDB connections', async () => {
+  await enqueueObservation({ user_id: 'test-user' }, [])
+  assert.equal(idb.records('sporely_sync').length, 1)
+  // Let the sync triggered by the commit read the queue and settle.
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(idb.openConnections, 0, 'no connection left open after enqueue and the triggered sync')
+
+  idb.faults.failCommit = dbName => (dbName === 'sporely_sync' ? domError('QuotaExceededError') : null)
+  await assert.rejects(enqueueObservation({ user_id: 'test-user' }, []), { name: 'QuotaExceededError' })
+  assert.equal(idb.openConnections, 0, 'an aborted queue write closes its connection')
+})
