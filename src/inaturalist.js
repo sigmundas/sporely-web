@@ -274,19 +274,47 @@ function _httpErrorMessage(label, response, payload) {
 const INAT_DEBUG_REDACTED = '[redacted]'
 const INAT_DEBUG_SECRET_KEY = /token|secret|password|authorization|^code$|^jwt$/i
 
-export function redactInaturalistDebugBody(value, depth = 0) {
+// Collect the string values of credential-named fields, so a copy of a secret
+// echoed in another field (an error message, say) is scrubbed too.
+function _collectInatDebugSecrets(value, secrets, depth = 0) {
+  if (!value || typeof value !== 'object' || depth > 8) return secrets
+  for (const [key, item] of Object.entries(value)) {
+    if (INAT_DEBUG_SECRET_KEY.test(key) && typeof item === 'string' && item.length >= 6) {
+      secrets.add(item.replace(/^Bearer\s+/i, ''))
+    } else {
+      _collectInatDebugSecrets(item, secrets, depth + 1)
+    }
+  }
+  return secrets
+}
+
+function _redactInatDebugValue(value, secrets, depth) {
   if (value === null || value === undefined) return value
-  if (typeof value === 'string') return depth === 0 ? INAT_DEBUG_REDACTED : value
+  if (typeof value === 'string') {
+    if (depth === 0) return INAT_DEBUG_REDACTED
+    let out = value
+    for (const secret of secrets) out = out.split(secret).join(INAT_DEBUG_REDACTED)
+    return out
+  }
   if (typeof value !== 'object') return value
   if (depth > 8) return INAT_DEBUG_REDACTED
-  if (Array.isArray(value)) return value.map(item => redactInaturalistDebugBody(item, depth + 1))
+  if (Array.isArray(value)) return value.map(item => _redactInatDebugValue(item, secrets, depth + 1))
   const out = {}
   for (const [key, item] of Object.entries(value)) {
     out[key] = INAT_DEBUG_SECRET_KEY.test(key)
       ? INAT_DEBUG_REDACTED
-      : redactInaturalistDebugBody(item, depth + 1)
+      : _redactInatDebugValue(item, secrets, depth + 1)
   }
   return out
+}
+
+export function redactInaturalistDebugBody(value, { knownSecrets = [] } = {}) {
+  const secrets = _collectInatDebugSecrets(value, new Set())
+  for (const secret of knownSecrets) {
+    const text = String(secret || '').trim()
+    if (text.length >= 6) secrets.add(text)
+  }
+  return _redactInatDebugValue(value, secrets, 0)
 }
 
 function _recordInatDebugResponse(label, endpoint, response, payload) {

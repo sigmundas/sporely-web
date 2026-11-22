@@ -1068,5 +1068,13 @@ test('redactInaturalistDebugBody covers OAuth token responses and non-JSON bodie
     },
   )
   assert.equal(redactInaturalistDebugBody('access_token=abc'), '[redacted]')
+  assert.deepEqual(
+    redactInaturalistDebugBody({ api_token: 'tok-123456', message: 'bad token tok-123456', list: ['tok-123456'] }),
+    { api_token: '[redacted]', message: 'bad token [redacted]', list: ['[redacted]'] },
+  )
+  assert.deepEqual(
+    redactInaturalistDebugBody({ error: 'Bearer known-secret-1 rejected' }, { knownSecrets: ['known-secret-1'] }),
+    { error: 'Bearer [redacted] rejected' },
+  )
   assert.equal(redactInaturalistDebugBody(null), null)
 })
