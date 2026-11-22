@@ -412,6 +412,8 @@ async function _deleteQueueItem(itemId) {
       tx.objectStore(STORE_NAME).delete(itemId)
       tx.oncomplete = resolve
       tx.onerror = () => reject(tx.error)
+      // A commit failure fires only abort, so without this the delete never settles.
+      tx.onabort = () => reject(tx.error || new Error('Queue delete aborted'))
     })
   } finally {
     db.close()
@@ -556,7 +558,6 @@ export async function enqueueObservation(obsPayload, imageEntries) {
 async function _enqueueObservation(obsPayload, imageEntries) {
   const queuedImages = _normalizeQueuedImages(imageEntries)
   const persistentImages = await _serializeQueuedImagesForStorage(queuedImages)
-  const db = await openDB()
   const queueUserId = _normalizeQueueUserId(obsPayload.user_id)
   // Keys are minted once, at queue time, and persisted with the item so every
   // retry repeats the same POST.
@@ -569,6 +570,7 @@ async function _enqueueObservation(obsPayload, imageEntries) {
     ts: Date.now(),
   }
 
+  const db = await openDB()
   const written = new Promise((resolve, reject) => {
     // Strict: oncomplete fires only once the item is flushed to disk, so a
     // caller may then drop its own copy. Engines without the option ignore it.
