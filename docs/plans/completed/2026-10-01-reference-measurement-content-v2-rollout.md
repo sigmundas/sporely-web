@@ -1,5 +1,7 @@
 # Reference measurement content v2 rollout
 
+> **Closed 2026-11-22:** server and web scope done. Stage A (`20261001213000`) and Stage M (`20261002120000`, PR #25) are applied in production. Stage C is moot (web has no reference-snapshot reader). Stage D was done without applying the pinned `20260914090000`: `20261026180718_activate_reference_reported_statistics.sql` (PR #48) replays it at the schema head and is applied in production (see `docs/reference-statistics-activation.md`). Stage B (sporely-landing) and Stage E (sporely-py desktop gate flip) are owned by those repos and were not checked here. Production state verified read-only with `supabase migration list` on 2026-11-22.
+
 Status: approved direction (owner decisions 2026-10-01). Stage A **LIVE**
 (deployed 2026-10-02). Stage M server candidate on
 `feature/reference-v2-stage-m` awaiting review; not deployed.

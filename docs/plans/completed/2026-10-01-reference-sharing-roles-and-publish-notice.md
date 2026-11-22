@@ -1,11 +1,13 @@
 # Stage 2c: contradicting references and the publish notice
 
-> **Superseded in part (2026-10-01):** the owner replaced opt-in sharing with default-on sharing and a sticky per-reference Stop sharing. See `docs/plans/active/2026-10-01-reference-sharing-default-on.md`. The consent texts, the consent dialog, the activation gate and the content proof described here no longer apply. Roles, labels and the `_v2` version gate (Stage 2c) remain.
+> **Closed 2026-11-22:** done for sporely-web. Roles migration `20261001091940` (PR #15), `_v2` reads in `20261001213000` (PR #23) and the web publish notice (PR #18) are merged; both migrations are applied in production. The activation gate and consent-text sections are obsolete (default-on). Landing and desktop label rules belong to sporely-landing and sporely-py. Production state verified read-only with `supabase migration list` on 2026-11-22.
+
+> **Superseded in part (2026-10-01):** the owner replaced opt-in sharing with default-on sharing and a sticky per-reference Stop sharing. See `docs/plans/completed/2026-10-01-reference-sharing-default-on.md`. The consent texts, the consent dialog, the activation gate and the content proof described here no longer apply. Roles, labels and the `_v2` version gate (Stage 2c) remain.
 
 
 Status: proposed, revised after general review and security review of
 `3f9eec2` (both "needs changes"; incorporated). Not started. Follows Stage 2
-(`docs/plans/active/2026-09-30-reference-sharing-consent.md`). Consent text v1
+(`docs/plans/completed/2026-09-30-reference-sharing-consent.md`). Consent text v1
 stays inactive throughout. Activation is a separate owner decision, under the
 gate at the end. Desktop PR #7 (sporely-py) stays unmerged until the owner's
 manual checks pass.

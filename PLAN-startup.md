@@ -13,7 +13,8 @@ work.
 
 Stage C makes the app feel useful in the field beyond capture/queue. It has
 NOT begun. Non-goals for Stage C stated in prior planning still apply: no
-service worker in this stage, no taxonomy cache pass, no full-resolution
+service worker in this stage (the service worker and offline app shell are
+planned separately in `docs/plans/active/2026-10-31-iphone-offline-startup.md`), no taxonomy cache pass, no full-resolution
 media cache, no new auth states, no Artsorakel redesign.
 
 Work items:

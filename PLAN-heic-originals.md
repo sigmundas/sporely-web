@@ -1,5 +1,13 @@
 # Plan: Preserve HEIC/HDR Originals Alongside Sporely Cloud Derivatives
 
+> **Status 2026-11-22:** client phases not started. Web import still converts
+> HEIC to JPEG (`src/screens/import-helpers.js`) and does not upload a separate
+> original (it can read `original_storage_path` rows, e.g. from desktop).
+> Server groundwork exists: the Worker accepts the `original` variant and
+> authorizes `original_storage_path` (`cloudflare/r2-upload-worker/src/index.js`),
+> and the column comes from `20260602110258`. The quota policy (section 10) is
+> still an open owner decision.
+
 ## Goal
 
 Preserve original HEIC/HEIF files in Sporely Cloud so that:

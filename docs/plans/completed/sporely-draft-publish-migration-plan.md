@@ -1,5 +1,10 @@
 # Sporely Draft / Publish State and Find Filter Plan
 
+> **Status 2026-11-22:** the draft/publish foundation
+> (`20260624120000_draft_publish_foundation.sql`) and the Finds status filter
+> shipped. The stale-draft limits ("Old and stale drafts") were never
+> implemented; they continue as "Draft observation expiry policy" in `PLAN.md`.
+
 This plan separates **workflow state** from **visibility**.
 
 - `is_draft` answers: “Is this observation unfinished?”

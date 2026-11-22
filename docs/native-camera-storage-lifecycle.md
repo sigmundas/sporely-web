@@ -1,6 +1,7 @@
 # Sporely Cam capture storage lifecycle (Android)
 
-Status: implemented on `feature/native-camera-originals-lifecycle`; device QA pending.
+Status: merged (`975c623`, `42e6977`) and shipped in v0.7.9; device QA has no
+recorded result (tracked in `docs/manual-qa.md`).
 
 ## Problem
 

@@ -1,5 +1,11 @@
 # Production migration-order exception — 2026-09-25
 
+> **2026-11-22:** still in force. `20260914090000` remains local-only and
+> pinned in `supabase/deploy-exceptions.json`. Its content reached production
+> through `20261026180718_activate_reference_reported_statistics.sql` (applied;
+> see `docs/reference-statistics-activation.md`), so the deferred file must
+> never be applied. Removing the registry entry needs its own reviewed change.
+
 **Status:** approved by the owner on 2026-09-25. This is a deliberate,
 documented exception to timestamp-ordered migration history.
 

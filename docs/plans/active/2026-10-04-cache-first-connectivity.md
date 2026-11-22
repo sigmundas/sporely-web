@@ -2,6 +2,10 @@
 
 Status: proposed 2026-10-04. Planning only; implementation and execution have not started.
 
+> **Checked 2026-11-22:** still not started (no `src/connectivity-state.js`). The
+> "Verified starting point" below predates the account-isolation changes to
+> `src/main.js` (PR #58, 2026-11-18); re-audit it before Stage 1.
+
 Purpose: improve startup and connection recovery. This plan does not change camera capture, photo imports, image aspect ratios, or upload metadata.
 
 ## Outcome

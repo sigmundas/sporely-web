@@ -275,7 +275,7 @@ beyond queued items.
   - delete obsolete prompt text unless it is intentionally archived
 - The image pipeline refactor remains conservative because the app currently works.
 - Phase 1 added:
-  - `docs/image-pipeline-phase1.md`
+  - `docs/image-pipeline-phase1.md` (now `docs/plans/completed/image-pipeline-phase1.md`)
   - opt-in image-pipeline debug logging
 - The next intended image pipeline step is helper extraction only:
   - shared `isBlob`
