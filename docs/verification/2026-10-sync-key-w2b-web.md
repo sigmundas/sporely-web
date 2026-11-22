@@ -1,6 +1,6 @@
 # Stage 8b — disposable verification of web sync keys (W3)
 
-Date: 2026-10-16. Plan: `docs/plans/active/2026-10-14-sync-key-identity.md`,
+Date: 2026-10-16. Plan: `docs/plans/completed/2026-10-14-sync-key-identity.md`,
 Stage 8b. Verifies accepted Stage 8 (`46c9297`) on the disposable target only.
 No production access, deployment or merge.
 

@@ -1,5 +1,7 @@
 # Proposal: spore measurement writes must own their image
 
+> **Closed 2026-11-22:** implemented. Was `docs/proposals/spore-measurement-image-ownership-rls.md`. `20260925160000_enforce_spore_child_image_ownership.sql` (`b0097c7`) rewrites both `spore_measurements` write policies and the `spore_annotations` policies, with `supabase/tests/spore_child_image_ownership_rls_test.sql`; it is applied in production. Not re-checked: the public-RPC defence-in-depth filter (item 3 below). Production state verified read-only with `supabase migration list` on 2026-11-22.
+
 Status: proposal only — not implemented, needs approval. Found during the
 security review of `20260925120000_owner_sync_metadata_parents.sql`.
 

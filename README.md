@@ -44,9 +44,10 @@ If you want a bit more context without diving straight into the code:
 - database and policy notes: [SUPABASE_DB.md](SUPABASE_DB.md)
 - app/code structure: [ARCHITECTURE.md](ARCHITECTURE.md) (auth state machine, sign-out semantics, capability gate, live-reconnect pipeline)
 - outstanding device QA: [docs/manual-qa.md](docs/manual-qa.md) (includes the troubleshooting appendix for the "Session expired" banner)
-- image pipeline checklist and current flow notes: [docs/image-pipeline-phase1.md](docs/image-pipeline-phase1.md)
+- image pipeline checklist and current flow notes: [docs/plans/completed/image-pipeline-phase1.md](docs/plans/completed/image-pipeline-phase1.md)
+- current work: [PLAN.md](PLAN.md) (backlog), [docs/plans/active/](docs/plans/active/) (staged plans), [INBOX.md](INBOX.md) (unsorted ideas and open review findings)
 
-> **Headline risk for v0.7.2:** the QA round 5 fix (commit `862af60` — the cached-reconnect no-op regression) shipped **without any device verification**. The exact failure mode the release exists to fix (live same-user reconnect from `AUTHENTICATED_CACHED`) has never been observed fixed on a device. `docs/manual-qa.md` item 1 is the mandatory first check. Additionally, `AUTHENTICATED_REAUTH_REQUIRED` — the only state that shows the user-visible "Session expired" copy — has never been entered on a device in any round; the `docs/manual-qa.md` troubleshooting appendix lists the relevant log lines.
+> **Unverified on a device:** live same-user reconnect from `AUTHENTICATED_CACHED` (fix `862af60`, shipped in v0.7.2) and the `AUTHENTICATED_REAUTH_REQUIRED` "Session expired" state have no recorded device pass. See `docs/manual-qa.md`.
 
 ## Local Development
 
@@ -111,7 +112,7 @@ npx cap sync android
 - To bump the package version and Android `versionCode`, use the existing scripts:
   - `npm run sync:version:bump-code`
   - `npm run android:install:bump`
-- Release signing is not set up in CI yet.
+- Signed release builds run in CI: pushing a `v*` tag (or a manual dispatch) runs `.github/workflows/release-android.yml`, which decodes the keystore from repository secrets.
 - Do not commit keystores, `keystore.properties`, or any other signing files.
 
 ## Environment Variables
@@ -149,9 +150,13 @@ This repository contains the open-source Sporely web client and Android Capacito
 
 - Vite 6
 - Vanilla JS modules
-- Supabase JS v2
-- Capacitor Android
+- Supabase JS v2 (auth, Postgres, Edge Functions)
+- Cloudflare R2 media through the `upload.sporely.no` Worker (`cloudflare/r2-upload-worker/`)
+- Capacitor 8 Android
 - `@capawesome/capacitor-file-picker`
+- Leaflet (map)
+- Cloudflare Turnstile (sign-up; see `docs/TURNSTILE.md`)
+- Stripe (Pro checkout, via Edge Functions)
 
 ## Translations
 

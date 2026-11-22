@@ -1,5 +1,11 @@
 # Shared-reference eligibility for species outside the taxonomy-v3 registry
 
+> **Status 2026-11-22:** Stage 1 (label fix) merged in PR #10 (`932acde`).
+> Stage 2 was replaced by default-on sharing
+> (`docs/plans/completed/2026-10-01-reference-sharing-default-on.md`). Stage 3
+> (widening beyond the registry) has not started and needs an owner decision
+> and security review first.
+
 Status: decided 2026-09-30. Reviewed (general and security review of
 `758478b`, both "needs changes"; incorporated). The immediate scope is Stage 1,
 the label fix, only. Stage 2 (consent and visibility) and Stage 3 (any

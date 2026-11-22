@@ -1,5 +1,10 @@
 # Reported statistics activation
 
+> **Applied:** `20261026180718` is in the production migration history
+> (verified read-only with `supabase migration list` on 2026-11-22). Whether the `post-verify` step
+> below was run is not recorded here. The steps are kept as the record of how
+> it was deployed.
+
 The single-user desktop now writes the existing full L/W/Q content and frozen
 v2 attachments. Migration `20261026180718` installs the already reviewed v2
 snapshot implementation at the current chronological head and removes the

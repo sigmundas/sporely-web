@@ -1,5 +1,7 @@
 # Stage 2d: references shared by default, and a dismissible publish notice
 
+> **Closed 2026-11-22:** done for sporely-web. Server `20261001113007` (PR #19) is applied in production; the web notice (PR #18) is merged; the web list was removed in PR #28. Open outside this repo: desktop PR #7 in sporely-py. Optional cleanup: the owner RPCs `list_my_reference_sharing`, `stop_sharing_reference_set` and `share_reference_set_again` have no web caller (removing them is an RPC-surface change and needs security review). Production state verified read-only with `supabase migration list` on 2026-11-22.
+
 > **Superseded in part (2026-10-09):** the owner removed the web "My shared
 > references" profile section (`src/shared-references.js`, its Stop sharing
 > and Share again actions, and the `sharedReferences.*` strings) in PR #28

@@ -1,4 +1,19 @@
-# Outstanding manual device QA (as of v0.7.2, audited 2026-08-20)
+# Outstanding manual device QA
+
+This is the single list of device checks that have no recorded result. Items
+1–13 date from v0.7.2 (audited 2026-08-20); later code may have changed some
+of them, so re-read the scenario against the current build before running it.
+
+## Added 2026-11-22 from closed plans
+
+- **Android import recovery, emulator gate E1–E4.** Table and steps in
+  `docs/verification/2026-10-android-import-recovery.md` ("Emulator restart
+  verification"). Code merged in PR #33.
+- **Sporely Cam storage lifecycle** (v0.7.9): "Save originals to phone",
+  post-enqueue cache cleanup, 48 h orphan prune. Checklist in
+  `docs/native-camera-storage-lifecycle.md`.
+
+## v0.7.2 list (audited 2026-08-20)
 
 Consolidated from the DEVICE-QA-REQUIRED checklists in `PLAN-startup.md`
 (startup/offline work shipped in v0.7.2) and the location/crash-recovery

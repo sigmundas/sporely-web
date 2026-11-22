@@ -1,7 +1,7 @@
 // Publish notice (Stage 2c, web). A Publish/Cancel confirmation shown on every
 // change that makes an observation public and not a draft, and on every move
 // of a public observation from approximate to exact location. Plan:
-// docs/plans/active/2026-10-01-reference-sharing-roles-and-publish-notice.md,
+// docs/plans/completed/2026-10-01-reference-sharing-roles-and-publish-notice.md,
 // "Publish notice (web and desktop)".
 //
 // Verified public exposure of a published (visibility='public', is_draft=false)

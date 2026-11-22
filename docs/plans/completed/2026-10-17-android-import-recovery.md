@@ -1,5 +1,7 @@
 # Android Import Recovery (formerly G5 I6)
 
+> **Closed 2026-11-22:** code done. Fixes `3d6fce8`, `c0ab5d6` and `2d9704f` merged via PR #33. The emulator restart gate (E1–E4 in `docs/verification/2026-10-android-import-recovery.md`) has no recorded result and is listed in `docs/manual-qa.md`.
+
 Workflow: `android-import-recovery`. Branch `fix/android-import-recovery`,
 based on `c35186f` (the first I6 fix, on top of accepted photo-location Stage 5
 `51fab3c`). Owner-approved 2026-10-17.

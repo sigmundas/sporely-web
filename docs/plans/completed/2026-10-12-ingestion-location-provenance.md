@@ -1,5 +1,7 @@
 # Camera and photo imports — record upload method and GPS outcomes
 
+> **Closed 2026-11-22:** implemented and merged. Migration `20261012105630_ingestion_location_provenance.sql` and client commit `1029975` merged via PR #33 (`88c9ff2`); the migration is applied in production. The desktop preservation stage (`3850b3f`) is on sporely-py main (PR #16). The status text below describes the plan before execution. Production state verified read-only with `supabase migration list` on 2026-11-22.
+
 Status: five-stage scope approved in principle; execution wording revised after refused intake. Existing Stage 1 files are uncommitted preparation evidence, not an accepted candidate. Only Stage 1 preparation is currently authorized. Starting a managed run, proceeding to Stage 2, and production operations each require the applicable user action described below.
 Date: 2026-10-12
 Scope: sporely-web ingestion, durable state, Supabase metadata; a separate sporely-py preservation stage.
@@ -10,7 +12,7 @@ Purpose: record how each photo entered Sporely and where observation coordinates
 
 This is a gated, cross-repository plan: use compile intake, not the plain Markdown direct-run route. The five numbered stages below are intentional. Intake must preserve their repository ownership, explicit manual gates and completion gate in its manifests. A refused intake is not authorization to start work. Preparing this revision does not start any stage.
 
-The plan is kept at docs/plans/active/2026-10-12-ingestion-location-provenance.md in the normal sporely-web repository. For managed runs the input plan is immutable: agents write only their current stage's notes.md; the engine owns handoffs, acceptance, gates and run state. There is no requirement to edit another checkout's plan during a run. Ordinary documentation updates outside a managed run use this canonical path on the selected web branch and reach main through normal reviewed Git integration.
+The plan is kept at docs/plans/completed/2026-10-12-ingestion-location-provenance.md in the normal sporely-web repository. For managed runs the input plan is immutable: agents write only their current stage's notes.md; the engine owns handoffs, acceptance, gates and run state. There is no requirement to edit another checkout's plan during a run. Ordinary documentation updates outside a managed run use this canonical path on the selected web branch and reach main through normal reviewed Git integration.
 
 Repository inventory for read-only intake:
 

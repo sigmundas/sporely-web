@@ -1,6 +1,6 @@
 # Android import recovery — contract and verification record
 
-Plan: `docs/plans/active/2026-10-17-android-import-recovery.md`, Stage 1
+Plan: `docs/plans/completed/2026-10-17-android-import-recovery.md`, Stage 1
 (formerly G5 I6). Branch `fix/android-import-recovery`, base `fb6f79e`
 (plan commit on top of `c35186f`). Review range for the complete I6 work:
 `51fab3c..HEAD`.

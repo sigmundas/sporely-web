@@ -1,7 +1,7 @@
 # Runbook — obsolete-desktop sync brake (production)
 
 Stage: `2026-10-13-obsolete-desktop-sync-brake`; re-issued by Stage 1b of
-`docs/plans/active/2026-10-14-sync-key-identity.md`.
+`docs/plans/completed/2026-10-14-sync-key-identity.md`.
 Migration: `supabase/migrations/20261015090000_obsolete_desktop_sync_brake.sql`
 (the reviewed `20261013200000`, never applied in production, re-versioned to
 apply after the sync-key migrations; function body, triggers, grants and
@@ -9,7 +9,11 @@ refusal text unchanged).
 Worker: `cloudflare/r2-upload-worker/src/obsolete-desktop-guard.js`, wired into
 `handleRequest` in `cloudflare/r2-upload-worker/src/index.js`.
 
-Status: **prepared, not executed.** Deploying the worker and applying the
+> **2026-11-22:** the brake migration `20261015090000` and the sync-key
+> migrations are applied in production (verified read-only with `supabase migration list` on 2026-11-22). Whether
+> the Worker guard was deployed is not recorded in this repo.
+
+Status (as prepared): **prepared, not executed.** Deploying the worker and applying the
 migration to production are the **user's** actions. No agent deploys the
 worker, pushes the migration, connects to production, or sees production
 output beyond the aggregate values this runbook marks as recordable.

@@ -38,12 +38,16 @@ Cloudflare R2 pipeline.
 
 | Layer | Choice |
 |---|---|
-| Static Analysis | ESLint (planned) for automating the 10-point code review checklist |
-| Unit Testing | Vitest (planned) for testing core logic like sync queues, AI crop math, and deduplication |
-| Database | Supabase local testing utilities / pgTAP (planned) for automated RLS policy auditing |
+| Static Analysis | ESLint (`npx eslint .`, `eslint.config.js`) |
+| Unit Testing | `node:test` (`npm test`); tests sit beside modules as `src/**/*.test.js` |
+| Database | Rollback-only SQL suites in `supabase/tests/*.sql`, run against a local Supabase database |
+| CI | `.github/workflows/ci.yml` |
 ---
 
 ## File structure
+
+Main modules only (2026-11-22: about 80 non-test modules in `src/`; run `ls src/` for
+the full list). Each module's tests sit beside it as `<name>.test.js`.
 
 ```
 sporely-web/
@@ -55,10 +59,10 @@ sporely-web/
 │       └── wrangler.toml   Worker config — routes, vars, R2 binding
 ├── supabase/
 │   ├── config.toml         Supabase local/deploy config for Edge Functions
-│   ├── profile-storage-usage.sql Supabase profile storage/quota tally helper
-│   └── functions/
-│       └── delete-account/
-│           └── index.ts    Self-service account deletion (service-role Edge Function)
+│   ├── migrations/         Production migration history (see AGENTS.md)
+│   ├── tests/              Rollback-only SQL regression suites
+│   └── functions/          Edge Functions: delete-account, create-pro-checkout,
+│                           stripe-webhook, admin-ops, reference-curation
 ├── vite.config.js
 └── src/
     ├── main.js             Entry point — hash parsing, session check, boot, deferred auth pipeline
@@ -546,6 +550,19 @@ Media access control is now handled by the R2 upload worker (JWT path enforcemen
 and Cloudflare's public CDN for serving.
 
 ---
+
+## Platform constraints
+
+Moved from the former `INSTRUCTIONS.md` (2026-11-22):
+
+- **Memory:** canvas work must run sequentially. Wipe a canvas (`width = 0`) and
+  revoke object URLs as soon as they are no longer needed.
+- **iOS/Safari:** do not stream a `Blob` into `fetch`; convert it to an
+  `ArrayBuffer` first.
+- **IndexedDB:** open a transaction only after slow async work (canvas,
+  encoding) has finished, or it auto-closes.
+- **Environment:** the PWA runs under browser memory limits; the Android APK has
+  a higher ceiling. Do not assume one from the other.
 
 ## Camera Behaviors (Native vs Web)
 

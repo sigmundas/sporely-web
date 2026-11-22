@@ -162,11 +162,8 @@ zero existing observations with resolved stable taxonomy-v2 identity. See
 
 ### Community spore-data RPCs
 - Public contributor / measurement aggregates should be exposed through `SECURITY DEFINER` RPCs, not by granting blanket public `SELECT` on `spore_measurements`
-- Existing SQL draft:
-  - `sporely-web/supabase/migrations/supabase_spore_community_schema.sql`
-- People-directory RPC:
-  - `sporely-web/supabase/migrations/supabase_people_directory.sql`
-- Relevant functions in that SQL draft include:
+- Defined in the baseline `supabase/migrations/20260521120000_baseline_live_public_schema.sql` (the older `supabase_spore_community_schema.sql` and `supabase_people_directory.sql` drafts were folded into it); `search_people_directory` was later fixed in `20260613121500_fix_search_people_directory.sql`.
+- Relevant functions include:
   - `search_community_spore_datasets`
   - `get_community_spore_dataset`
   - `community_spore_taxon_summary`
@@ -241,6 +238,10 @@ Full staged design and progress notes: [sporely-py/docs/spore-statistics-species
   - Public Stripe webhook endpoint
   - Verifies the Stripe signature with `STRIPE_WEBHOOK_SECRET`
   - Updates `profiles` with Pro entitlement fields after a paid checkout and revokes Pro on matching refunds
+- `admin-ops`
+  - Admin-only moderation and media operations used by `sporely-admin`: report dismiss/resolve, hide reported comment or observation, ban/unban, and preview/purge of expired image tombstones
+- `reference-curation`
+  - Curator workflow for shared reference contributions (claim, request changes, reject, accept to draft, edit draft, deprecate, withdraw, duplicate warnings)
 
 ---
 
@@ -351,7 +352,7 @@ For `avatars`:
 ## Operational checklist (recommended)
 
 1. **Run unique constraints SQL**
-   - File: `sporely-web/supabase/migrations/supabase_unique_constraints.sql`
+   - Now in the baseline `supabase/migrations/20260521120000_baseline_live_public_schema.sql` (the older `supabase_unique_constraints.sql`); sync identity has since moved to `sync_key` (see `docs/plans/completed/2026-10-14-sync-key-identity.md`)
    - Purpose: add/ensure `UNIQUE (desktop_id, user_id)` (or equivalent)
    - Status: ✅ Applied
 2. **Verify media paths**
@@ -387,9 +388,10 @@ For `avatars`:
 ## Where the "real SQL" lives (for maintainers)
 Do not copy policy SQL into this doc.
 Instead, policy/DDL changes live in:
-- `sporely/database/` (schema migrations / DDL artifacts)
-- any standalone SQL files referenced in `sporely/database/` for constraints/RPCs
+- `supabase/migrations/` (production migration history; see the migration-safety rules in `AGENTS.md`)
+- `supabase/schema.sql` (snapshot; regenerate only when a task requires it)
+- `supabase/tests/` (rollback-only SQL regression suites)
 
 If you need exact definitions:
-- update the appropriate SQL files under `sporely/database/`
-- then (optionally) update this doc's descriptions/invariants accordingly
+- read the latest migration that touches the object
+- add a new migration for any change, then (optionally) update this doc's descriptions/invariants accordingly

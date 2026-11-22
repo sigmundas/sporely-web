@@ -1,6 +1,8 @@
 # Stage 2: consent and visibility for shared reference data
 
-> **Superseded in part (2026-10-01):** the owner replaced opt-in sharing with default-on sharing and a sticky per-reference Stop sharing. See `docs/plans/active/2026-10-01-reference-sharing-default-on.md`. The consent texts, the consent dialog, the activation gate and the content proof described here no longer apply. Roles, labels and the `_v2` version gate (Stage 2c) remain.
+> **Closed 2026-11-22:** superseded. Migrations `20260930224506` (2a, PR #12) and `20260930232633` (2b, PR #13) are merged and applied in production. Opt-in consent was replaced by default-on sharing (`2026-10-01-reference-sharing-default-on.md`), and PR #28 removed the only web caller of the owner opt-in RPCs. Nothing here remains to implement. Production state verified read-only with `supabase migration list` on 2026-11-22.
+
+> **Superseded in part (2026-10-01):** the owner replaced opt-in sharing with default-on sharing and a sticky per-reference Stop sharing. See `docs/plans/completed/2026-10-01-reference-sharing-default-on.md`. The consent texts, the consent dialog, the activation gate and the content proof described here no longer apply. Roles, labels and the `_v2` version gate (Stage 2c) remain.
 
 
 Status: decided 2026-10-01. Revised after independent security review and
