@@ -33,6 +33,8 @@ import {
   forgetInaturalistSession,
   hasStoredInaturalistSession,
   inaturalistLinkEpoch,
+  fetchInaturalistApiToken,
+  redactInaturalistDebugBody,
 } from './inaturalist.js'
 
 function bytesToBase64(bytes) {
@@ -1032,4 +1034,39 @@ test('a link write still in flight when the session is forgotten is undone', asy
     await forgetInaturalistSession()
     runtime.restore()
   }
+})
+
+test('debug recording redacts iNaturalist credentials from response bodies', async () => {
+  const originalLocalStorage = globalThis.localStorage
+  const originalNamespace = globalThis.__sporelyAiDebug
+  globalThis.localStorage = { getItem: key => (key === 'sporely-debug-dashboard' ? 'true' : null) }
+  globalThis.__sporelyAiDebug = undefined
+  try {
+    const fetchImpl = async () => jsonResponse({ api_token: 'secret-api-token', user: { login: 'someone' } })
+    const token = await fetchInaturalistApiToken('secret-access-token', fetchImpl)
+    assert.equal(token.api_token, 'secret-api-token', 'the caller still gets the real token')
+
+    const recorded = globalThis.__sporelyAiDebug.jsonResponses[0]
+    assert.equal(recorded.source, 'inaturalist')
+    assert.deepEqual(recorded.body, { api_token: '[redacted]', user: { login: 'someone' } })
+    assert.ok(!JSON.stringify(globalThis.__sporelyAiDebug).includes('secret-'), 'no token anywhere in the debug store')
+  } finally {
+    globalThis.localStorage = originalLocalStorage
+    globalThis.__sporelyAiDebug = originalNamespace
+  }
+})
+
+test('redactInaturalistDebugBody covers OAuth token responses and non-JSON bodies', () => {
+  assert.deepEqual(
+    redactInaturalistDebugBody({
+      access_token: 'a', refresh_token: 'r', token_type: 'Bearer', expires_in: 7200,
+      nested: [{ id_token: 'i', client_secret: 's', code: 'c', name: 'kept' }],
+    }),
+    {
+      access_token: '[redacted]', refresh_token: '[redacted]', token_type: '[redacted]', expires_in: 7200,
+      nested: [{ id_token: '[redacted]', client_secret: '[redacted]', code: '[redacted]', name: 'kept' }],
+    },
+  )
+  assert.equal(redactInaturalistDebugBody('access_token=abc'), '[redacted]')
+  assert.equal(redactInaturalistDebugBody(null), null)
 })
