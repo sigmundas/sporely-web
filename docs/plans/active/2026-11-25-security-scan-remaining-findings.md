@@ -1,6 +1,8 @@
 # Remaining findings from the 2026-11-25 security scan
 
-Status: written 2026-11-25 as a handoff. Package A is done: PR #72, merged as
+Status: written 2026-11-25 as a handoff. Package B is implemented on branch
+`fix/bans-stop-writes` (migration `20261125233000`), not yet merged or
+deployed. Package A is done: PR #72, merged as
 `26c3779`, migration `20261125230000` applied to production on 2026-11-25
 through the deploy tree (post-verify passed; a read-only catalog check
 confirmed the policies, grants, view options and trigger functions). Nothing
@@ -164,6 +166,36 @@ refuse banned users. A banned user can still insert observations, comments,
 friend requests, follows and reports. Fix: the trigger, or an `is_banned`
 check in the insert policies, and correct the doc. Production had 0 banned
 users.
+
+Outcome of B (2026-11-25, owner chose "all content writes"; reviewed by a
+Codex challenge and the `sporely-security-reviewer` agent;
+`banned_user_writes_test.sql`): migration `20261125233000` adds
+`private.refuse_banned_writer()` as trigger `trg_000_writer_not_banned` on
+every client-writable content table and on `profiles`. A banned signed-in
+caller, or one with no profile row, gets 42501 with hint
+`sporely_account_suspended`. DELETE, tombstones, the activity ping, blocking
+others, service-role and nested trigger writes stay allowed, and banned
+authors can read (so delete) their own comments. Left open:
+
+- **Clients do not recognise the suspension.** Web `classifyQueueSyncError`
+  treats it as retryable (one refused request every 30 s while the app is
+  open; no data lost), desktop raises a generic `CloudWriteRejectedError`.
+  A pending AI identification can be dropped from the web queue after its
+  write is refused (`src/sync-queue.js` swallows identification errors).
+  Fix: map the hint to a blocked, non-retryable state on both clients and
+  show "account suspended".
+- **Deleting the cover image on web half-succeeds for a banned user**: the
+  tombstone commits, the follow-up `observations.image_key` update is
+  refused, and the UI reports failure. Low; content is hidden anyway.
+- **`avatars` storage bucket has no ban check.** Its policies are not in the
+  migrations; a banned user can overwrite `<uid>/avatar.jpg` or host files
+  under `<uid>/`. Banned profiles are hidden from the public profile paths,
+  but the object URL is public. Needs a read-only check of production
+  `storage` policies, then a tracked policy migration.
+- **A banned admin keeps admin access.** `admin-ops` checks only `is_admin`
+  and writes with service role. Fix: require `is_banned = false` in the admin
+  gate (edge-function deploy).
+- A banned user who never finished profile setup cannot save it.
 
 ### C. Upload worker (`cloudflare/r2-upload-worker/src/index.js`; needs a worker deploy)
 
