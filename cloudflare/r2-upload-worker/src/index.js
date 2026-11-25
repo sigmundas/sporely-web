@@ -161,6 +161,11 @@ async function handleRequest(request, env, ctx) {
           hasMediaBucket: !!env.MEDIA_BUCKET,
           hasPrivateMediaBucket: !!env.PRIVATE_MEDIA_BUCKET,
         },
+        rateLimiters: {
+          upload: !!env.UPLOAD_RATE_LIMITER,
+          artsorakel: !!env.ARTSORAKEL_RATE_LIMITER,
+          location: !!env.LOCATION_RATE_LIMITER,
+        },
         legacyBucketBound: !!env.MEDIA_BUCKET,
         privateBucketBound: !!env.PRIVATE_MEDIA_BUCKET,
         mediaVariants: Array.from(MEDIA_VARIANTS),
@@ -230,6 +235,11 @@ async function handleReverseLocation(request, env, url) {
   if (request.headers.get('Origin') && !origin) {
     throw httpError(403, 'origin_not_allowed', 'Origin is not allowed')
   }
+
+  await enforceRateLimit(
+    env.LOCATION_RATE_LIMITER,
+    `location:${request.headers.get('CF-Connecting-IP') || 'unknown'}`,
+  )
 
   const lat = Number(url.searchParams.get('lat'))
   const lon = Number(url.searchParams.get('lon'))
@@ -303,6 +313,27 @@ async function handleReverseLocation(request, env, url) {
     env,
     origin,
   )
+}
+
+/**
+ * Cloudflare rate-limit binding check (wrangler.toml `[[ratelimits]]`).
+ * Limits are per Cloudflare location and approximate; they brake scripted
+ * abuse, not normal use. An unbound limiter (local tests, a misconfigured
+ * deploy) or a limiter error lets the request through: the routes stay
+ * authenticated and quota-checked regardless.
+ */
+async function enforceRateLimit(limiter, key) {
+  if (!limiter || typeof limiter.limit !== 'function') return
+  let outcome
+  try {
+    outcome = await limiter.limit({ key })
+  } catch (error) {
+    console.error('[r2-upload-worker] rate limiter failed; allowing request', safeOperationError(error))
+    return
+  }
+  if (outcome && outcome.success === false) {
+    throw httpError(429, 'rate_limited', 'Too many requests; try again in a minute')
+  }
 }
 
 function handleOptions(request, env) {
@@ -406,6 +437,7 @@ async function handleUpload(request, env, ctx, url) {
   if (!claims?.sub || !key.startsWith(`${claims.sub}/`)) {
     throw httpError(403, 'key_not_allowed', 'Upload key must start with the authenticated user id')
   }
+  await enforceRateLimit(env.UPLOAD_RATE_LIMITER, `upload:${claims.sub}`)
 
   const contentLength = parseIntegerHeader(request.headers.get('Content-Length'))
   const maxUploadBytes = parsePositiveInt(env.MAX_UPLOAD_BYTES, DEFAULT_MAX_UPLOAD_BYTES)
@@ -1309,7 +1341,8 @@ async function handleArtsorakel(request, env, ctx) {
 
   const authHeader = request.headers.get('Authorization')
   const token = parseBearerToken(authHeader)
-  await verifySupabaseJwt(token, env, ctx)
+  const claims = await verifySupabaseJwt(token, env, ctx)
+  await enforceRateLimit(env.ARTSORAKEL_RATE_LIMITER, `artsorakel:${claims?.sub || ''}`)
 
   const artsorakelToken = resolveArtsorakelToken(env)
 
@@ -1353,6 +1386,7 @@ async function handleArtsorakelMedia(request, env, ctx) {
   const authHeader = request.headers.get('Authorization')
   const token = parseBearerToken(authHeader)
   const claims = await verifySupabaseJwt(token, env, ctx)
+  await enforceRateLimit(env.ARTSORAKEL_RATE_LIMITER, `artsorakel:${claims?.sub || ''}`)
 
   const artsorakelToken = resolveArtsorakelToken(env)
 

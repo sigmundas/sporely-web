@@ -3101,3 +3101,125 @@ for (const [label, usedBytes, expectedStatus] of [
     } finally { restoreFetch() }
   })
 }
+
+// ── Rate limits ───────────────────────────────────────────────────────
+
+function fakeLimiter({ success = true, throws = false } = {}) {
+  const keys = []
+  return {
+    keys,
+    async limit({ key }) {
+      keys.push(key)
+      if (throws) throw new Error('limiter down')
+      return { success }
+    },
+  }
+}
+
+test('wrangler.toml binds the agreed rate limits', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const toml = await readFile(new URL('../wrangler.toml', import.meta.url), 'utf8')
+  for (const [name, limit] of [
+    ['UPLOAD_RATE_LIMITER', 300], ['ARTSORAKEL_RATE_LIMITER', 60], ['LOCATION_RATE_LIMITER', 60],
+  ]) {
+    assert.match(toml, new RegExp(
+      `\\[\\[ratelimits\\]\\]\\nname = "${name}".*\\nnamespace_id = "\\d+"\\nsimple = \\{ limit = ${limit}, period = 60 \\}`))
+  }
+})
+
+test('uploads over the per-user rate limit get 429 before any read or write', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock(PRO_PROFILE)
+  const limiter = fakeLimiter({ success: false })
+  let bucketCalls = 0
+  try {
+    const response = await worker.fetch(
+      buildUploadRequest({
+        token, bodyBytes: 200, uploadMode: 'full', uploadVariant: 'full',
+        cloudPlan: 'pro', qualityProfile: 'high', sourceWidth: 100,
+        sourceHeight: 100, storedWidth: 100, storedHeight: 100,
+      }),
+      {
+        ...legacyUploadEnv(jwtSecret, {
+          head: async () => { bucketCalls += 1; return null },
+          put: async () => { bucketCalls += 1; return {} },
+        }),
+        UPLOAD_RATE_LIMITER: limiter,
+      },
+      {},
+    )
+    assert.equal(response.status, 429)
+    assert.equal((await response.json()).error, 'rate_limited')
+    assert.deepEqual(limiter.keys, ['upload:user-123'])
+    assert.equal(bucketCalls, 0)
+  } finally { restoreFetch() }
+})
+
+test('a failing rate limiter lets an upload through', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock(PRO_PROFILE)
+  try {
+    const response = await worker.fetch(
+      buildUploadRequest({
+        token, bodyBytes: 200, uploadMode: 'full', uploadVariant: 'full',
+        cloudPlan: 'pro', qualityProfile: 'high', sourceWidth: 100,
+        sourceHeight: 100, storedWidth: 100, storedHeight: 100,
+      }),
+      {
+        ...legacyUploadEnv(jwtSecret, { head: async () => null, put: async () => ({ etag: 'e' }) }),
+        UPLOAD_RATE_LIMITER: fakeLimiter({ throws: true }),
+      },
+      {},
+    )
+    assert.equal(response.status, 201)
+  } finally { restoreFetch() }
+})
+
+for (const path of ['/artsorakel', '/artsorakel/media']) {
+  test(`POST ${path} over the per-user rate limit gets 429 and never calls upstream`, async () => {
+    const { jwtSecret, token } = createWorkerAuthToken()
+    const upstream = installArtsorakelUpstreamMock(async () => {
+      throw new Error('upstream must not be called')
+    })
+    const limiter = fakeLimiter({ success: false })
+    try {
+      const response = await worker.fetch(
+        new Request(`https://upload.sporely.no${path}`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ keys: ['user-123/obs/0.webp'] }),
+        }),
+        {
+          ...TEST_ENV,
+          SUPABASE_URL: 'https://example.supabase.co',
+          SUPABASE_JWT_SECRET: jwtSecret,
+          ARTSORAKEL_API_TOKEN: 'test-secret-token',
+          ARTSORAKEL_RATE_LIMITER: limiter,
+        },
+        {},
+      )
+      assert.equal(response.status, 429)
+      assert.deepEqual(limiter.keys, ['artsorakel:user-123'])
+      assert.equal(upstream.calls.length, 0)
+    } finally { upstream.restore() }
+  })
+}
+
+test('GET /reverse-location over the per-IP rate limit gets 429 without an upstream call', async () => {
+  const originalFetch = globalThis.fetch
+  let upstreamCalls = 0
+  globalThis.fetch = async () => { upstreamCalls += 1; throw new Error('upstream must not be called') }
+  const limiter = fakeLimiter({ success: false })
+  try {
+    const response = await worker.fetch(
+      new Request('https://upload.sporely.no/reverse-location?lat=59.9&lon=10.7', {
+        headers: { 'CF-Connecting-IP': '203.0.113.7' },
+      }),
+      { ...TEST_ENV, LOCATION_RATE_LIMITER: limiter },
+      {},
+    )
+    assert.equal(response.status, 429)
+    assert.deepEqual(limiter.keys, ['location:203.0.113.7'])
+    assert.equal(upstreamCalls, 0)
+  } finally { globalThis.fetch = originalFetch }
+})

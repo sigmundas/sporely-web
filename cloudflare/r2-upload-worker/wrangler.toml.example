@@ -6,6 +6,25 @@ compatibility_date = "2026-04-10"
 binding = "MEDIA_BUCKET"
 bucket_name = "sporely-media"
 
+# Rate limits (Cloudflare Workers rate-limit bindings; period is 10 or 60 s).
+# Checked in src/index.js by enforceRateLimit; over the limit returns 429
+# `rate_limited`. Per Cloudflare location and approximate. namespace_id is
+# an account-unique integer naming each counter.
+[[ratelimits]]
+name = "UPLOAD_RATE_LIMITER"   # PUT /upload/*, per user id
+namespace_id = "1101"
+simple = { limit = 300, period = 60 }
+
+[[ratelimits]]
+name = "ARTSORAKEL_RATE_LIMITER"   # POST /artsorakel and /artsorakel/media, per user id
+namespace_id = "1102"
+simple = { limit = 60, period = 60 }
+
+[[ratelimits]]
+name = "LOCATION_RATE_LIMITER"   # GET /reverse-location, per client IP
+namespace_id = "1103"
+simple = { limit = 60, period = 60 }
+
 [vars]
 MEDIA_STORAGE_MODE = "legacy"
 SUPABASE_URL = "https://zkpjklzfwzefhjluvhfw.supabase.co"
