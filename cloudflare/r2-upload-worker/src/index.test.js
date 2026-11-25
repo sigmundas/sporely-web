@@ -3223,3 +3223,65 @@ test('GET /reverse-location over the per-IP rate limit gets 429 without an upstr
     assert.equal(upstreamCalls, 0)
   } finally { globalThis.fetch = originalFetch }
 })
+
+// ── Review fixes: deletion fence and promotion compensation ──────────
+
+test('a same-size overwrite whose profile is deleted before the write finishes is removed', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const legacy = makeMockBucketStage2({
+    'user-123/existing.webp': { body: new TextEncoder().encode('OLD') },
+  })
+  const originalFetch = globalThis.fetch
+  let profileLookups = 0
+  let tallyCalls = 0
+  globalThis.fetch = async input => {
+    const url = typeof input === 'string' ? input : String(input?.url || '')
+    if (url.includes('/rest/v1/profiles?')) {
+      profileLookups += 1
+      // First lookup: the account is live. Later: deletion removed the profile.
+      return new Response(JSON.stringify(profileLookups === 1 ? [PRO_PROFILE] : []), { status: 200 })
+    }
+    if (url.includes('/rest/v1/rpc/apply_profile_storage_delta')) {
+      tallyCalls += 1
+      return new Response('[]', { status: 200 })
+    }
+    throw new Error(`Unexpected fetch: ${url}`)
+  }
+  try {
+    const res = await worker.fetch(legacyOverwriteRequest(token, 'NEW'), legacyUploadEnv(jwtSecret, legacy), {})
+    assert.equal(res.status, 403)
+    assert.equal((await res.json()).error, 'profile_missing')
+    assert.equal(tallyCalls, 0, 'a same-size overwrite skips the tally')
+    assert.equal(legacy._has('user-123/existing.webp'), false,
+      'the write must not survive behind the deletion sweep')
+    assert.deepEqual(
+      legacy.events.filter(e => e.op === 'put').map(e => e.key).filter(k => legacy._has(k)), [])
+  } finally { globalThis.fetch = originalFetch }
+})
+
+test('a failed promotion reverses the storage tally and keeps the previous bytes', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const legacy = makeMockBucketStage2({
+    'user-123/existing.webp': { body: new TextEncoder().encode('PRIOR') },
+  })
+  const basePut = legacy.put.bind(legacy)
+  legacy.put = async (key, body, opts) => {
+    if (key === 'user-123/existing.webp') throw new Error('r2 put failed')
+    return basePut(key, body, opts)
+  }
+  const deltas = []
+  const restore = installProfileFetchMock(PRO_PROFILE, null, payload => deltas.push(payload.p_storage_delta))
+  try {
+    const res = await worker.fetch(
+      legacyOverwriteRequest(token, 'MUCH_LONGER_NEW_BYTES'),
+      legacyUploadEnv(jwtSecret, legacy),
+      {},
+    )
+    assert.equal(res.status, 500)
+    assert.equal((await res.json()).error, 'promotion_failed')
+    assert.equal(deltas.length, 2)
+    assert.equal(deltas[0] + deltas[1], 0, 'the tally must be reversed')
+    const final = await legacy.get('user-123/existing.webp')
+    assert.equal(new TextDecoder().decode(await final.body), 'PRIOR')
+  } finally { restore() }
+})

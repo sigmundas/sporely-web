@@ -787,6 +787,12 @@ async function handleUpload(request, env, ctx, url) {
         },
       })
       promoted = true
+    } catch (promotionError) {
+      // Fall through to the compensation below; rethrowing here (as a bare
+      // try/finally did) skipped the tally reversal and charged the quota
+      // for bytes that were never published.
+      console.error('Failed to promote temp upload to the canonical key',
+        safeOperationError(promotionError))
     } finally {
       // Always delete the temp; even if promotion succeeded we don't
       // want the temp object lingering. If promotion failed, the
@@ -798,11 +804,8 @@ async function handleUpload(request, env, ctx, url) {
     }
     if (!promoted) {
       // Try to unwind the DB PATCH we made above so DB and R2 agree.
-      if (canonicalBucket === 'private' && validatedImageId !== null && !isOverwrite) {
-        // Only if we upgraded canonical_bucket; on overwrite the row
-        // was already 'private' before this request so no PATCH to
-        // undo. (For an overwrite, canonical_bucket is unchanged.)
-      }
+      // No canonical_bucket PATCH to undo: this path is an overwrite, so
+      // the row already had its bucket before this request.
       try {
         await applyStorageDelta(env, claims.sub, -accountingStorageDelta, -imageDelta)
       } catch (rollbackError) {
@@ -811,6 +814,18 @@ async function handleUpload(request, env, ctx, url) {
       throw httpError(500, 'promotion_failed',
         'Failed to promote temp upload to the canonical key; previous bytes preserved')
     }
+  }
+
+  // Account deletion fence. Deletion deletes the profile, then sweeps the
+  // prefix. Any write above that the sweep might have missed finished
+  // before this lookup, so if the profile still exists here the sweep has
+  // not run yet and will see the object; if it is gone, remove our own
+  // write. Covers zero-delta overwrites, which skip the tally check.
+  if (hasSupabaseServiceRole(env) && !await fetchStorageProfile(env, claims.sub)) {
+    await uploadBucket.delete(key).catch(deleteError => {
+      console.error('Failed to remove upload after its profile was deleted', deleteError)
+    })
+    throw httpError(403, 'profile_missing', 'This account has no profile; uploads are refused')
   }
 
   // Stage 2: only emit a public `url` while still writing to the legacy
