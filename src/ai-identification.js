@@ -1676,6 +1676,13 @@ export function renderIdentifyProviderNotices(resultsByService = {}) {
     .join('')
 }
 
+// Status text shown in place of results. `message` can carry provider error
+// text (an upstream response body excerpt, a provider's error_description),
+// so it is always escaped before it reaches innerHTML.
+export function renderIdentifyStatusMessage(message, { slow = false } = {}) {
+  return `<div class="ai-results-empty${slow ? ' ai-results-slow' : ''}">${_esc(message)}</div>`
+}
+
 export function renderIdentifyResultRows(service, predictions = []) {
   const normalizedService = normalizeIdentifyService(service)
   return (Array.isArray(predictions) ? predictions : [])
