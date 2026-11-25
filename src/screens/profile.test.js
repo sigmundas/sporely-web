@@ -58,7 +58,9 @@ test('friend rows escape profile names and ids', () => {
     [{ id: 'id"><b>', username: null, display_name: '<script>alert(1)</script>' }],
   )
 
-  assert.doesNotMatch(html, /<script>|<b>/)
+  // Nothing from the profile or the id may arrive as markup.
+  assert.equal(html.includes('<script'), false)
+  assert.equal(html.includes('<b>'), false)
   assert.match(html, /<div class="friend-avatar">&lt;<\/div>/)
   assert.match(html, /data-id="id&quot;&gt;&lt;b&gt;"/)
 })
