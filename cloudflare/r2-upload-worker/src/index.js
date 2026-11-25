@@ -463,19 +463,20 @@ async function handleUpload(request, env, ctx, url) {
   // directly to `key` and then roll back on a downstream failure —
   // the original bytes are already gone.
   //
-  // For private mode, when an object already exists we:
+  // In both storage modes, when an object already exists we:
   //   1. Write the new body to a temporary key `<key>.pending-<nonce>`.
-  //   2. Run quota + canonical_bucket finalization.
+  //   2. Run quota (and, in private mode, canonical_bucket) finalization.
   //   3. On success: copy temp → final (a fresh `put(key, tempBody)`),
   //      then delete the temp key.
   //   4. On any failure after step 1: delete ONLY the temp key. The
   //      original `key` object is untouched.
   //
   // For a first-write (no existingObject), the destination is
-  // unoccupied, so we write directly. In legacy mode we retain the
-  // historic behaviour for backward compatibility.
+  // unoccupied, so we write directly. Legacy mode used to write an
+  // overwrite straight to `key`, so a failed tally update deleted both the
+  // new and the previous bytes.
   const isOverwrite = existingObject !== null && existingObject !== undefined
-  const useTempKeyForOverwrite = canonicalBucket === 'private' && isOverwrite
+  const useTempKeyForOverwrite = isOverwrite
   const nonce = crypto.randomUUID().replace(/-/g, '')
   const writeKey = useTempKeyForOverwrite ? `${key}.pending-${nonce}` : key
   const resultingLogicalBytes = Math.max(bodyBytes, alternateLogicalBytes)
@@ -645,7 +646,7 @@ async function handleUpload(request, env, ctx, url) {
   const cacheControl = canonicalBucket === 'private'
     ? 'private, no-store'
     : LEGACY_PUBLIC_CACHE_CONTROL
-  const object = await uploadBucket.put(writeKey, bodyBuffer, {
+  let object = await uploadBucket.put(writeKey, bodyBuffer, {
     httpMetadata: {
       contentType,
       cacheControl,
@@ -715,7 +716,7 @@ async function handleUpload(request, env, ctx, url) {
   if (useTempKeyForOverwrite) {
     let promoted = false
     try {
-      await uploadBucket.put(key, bodyBuffer, {
+      object = await uploadBucket.put(key, bodyBuffer, {
         httpMetadata: { contentType, cacheControl },
         customMetadata: {
           user_id: String(claims.sub),

@@ -1710,6 +1710,87 @@ test('Stage2a-r3: overwrite in private mode PRESERVES prior bytes when canonical
     } finally { globalThis.fetch = originalFetch }
   })
 
+function installLegacyOverwriteFetchMock({ failTally = false } = {}) {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async input => {
+    const url = typeof input === 'string' ? input : String(input?.url || '')
+    if (url.includes('/rest/v1/profiles?')) {
+      return new Response(JSON.stringify([{
+        is_pro: true, cloud_plan: 'pro', storage_quota_bytes: null,
+        total_storage_bytes: 0, storage_used_bytes: 0, image_count: 0, is_banned: false,
+      }]), { status: 200 })
+    }
+    if (url.includes('/rest/v1/rpc/apply_profile_storage_delta')) {
+      if (failTally) return new Response('tally error', { status: 500 })
+      return new Response(JSON.stringify([{
+        total_storage_bytes: 100, storage_used_bytes: 100, image_count: 1,
+      }]), { status: 200 })
+    }
+    throw new Error(`Unexpected fetch: ${url}`)
+  }
+  return () => { globalThis.fetch = originalFetch }
+}
+
+function legacyOverwriteRequest(token, body) {
+  return new Request('https://upload.sporely.no/upload/user-123/existing.webp', {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'image/webp',
+      'Content-Length': String(body.length),
+      'X-Sporely-Upload-Variant': 'full',
+    },
+    body: new TextEncoder().encode(body),
+  })
+}
+
+test('overwrite in legacy mode PRESERVES prior bytes when the storage tally fails', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const legacy = makeMockBucketStage2({
+    'user-123/existing.webp': { body: new TextEncoder().encode('PRIOR_BYTES_INTACT') },
+  })
+  const restore = installLegacyOverwriteFetchMock({ failTally: true })
+  try {
+    const res = await worker.fetch(
+      legacyOverwriteRequest(token, 'LONGER_NEW_BYTES_THAN_BEFORE'),
+      legacyUploadEnv(jwtSecret, legacy),
+      {},
+    )
+    assert.equal(res.status, 500)
+    assert.equal(legacy._has('user-123/existing.webp'), true,
+      'a failed legacy overwrite must not delete the previous object')
+    const final = await legacy.get('user-123/existing.webp')
+    assert.equal(new TextDecoder().decode(await final.body), 'PRIOR_BYTES_INTACT')
+    const putKeys = legacy.events.filter(event => event.op === 'put').map(event => event.key)
+    assert.equal(putKeys.length, 1)
+    assert.match(putKeys[0], /^user-123\/existing\.webp\.pending-[0-9a-f]{32}$/)
+    assert.equal(legacy._has(putKeys[0]), false, 'the temp key must be removed')
+  } finally { restore() }
+})
+
+test('overwrite in legacy mode PROMOTES temp→final on success', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const legacy = makeMockBucketStage2({
+    'user-123/existing.webp': { body: new TextEncoder().encode('PRIOR') },
+  })
+  const restore = installLegacyOverwriteFetchMock()
+  try {
+    const res = await worker.fetch(
+      legacyOverwriteRequest(token, 'NEW'),
+      legacyUploadEnv(jwtSecret, legacy),
+      {},
+    )
+    assert.equal(res.status, 201)
+    const final = await legacy.get('user-123/existing.webp')
+    assert.equal(new TextDecoder().decode(await final.body), 'NEW')
+    const tempKeys = legacy.events
+      .filter(event => event.op === 'put' && event.key.includes('.pending-'))
+      .map(event => event.key)
+    assert.equal(tempKeys.length, 1)
+    assert.equal(legacy._has(tempKeys[0]), false, 'the temp key must be removed')
+  } finally { restore() }
+})
+
 // ── DELETE /upload/<key> attempts both legacy + private buckets ───────
 
 function makeTrackedBucket(entries = {}) {
