@@ -132,6 +132,11 @@ BEGIN
      OR has_table_privilege('authenticated', 'public.comments', 'TRUNCATE') THEN
     RAISE EXCEPTION 'authenticated can still choose server columns or holds a needless privilege';
   END IF;
+  IF has_sequence_privilege('anon', 'public.comments_id_seq', 'USAGE,SELECT,UPDATE')
+     OR has_sequence_privilege('authenticated', 'public.comments_id_seq', 'SELECT,UPDATE')
+     OR NOT has_sequence_privilege('authenticated', 'public.comments_id_seq', 'USAGE') THEN
+    RAISE EXCEPTION 'comments_id_seq grants are not anon none / authenticated USAGE only';
+  END IF;
   IF has_function_privilege('anon', 'public.comment_author_is_visible(uuid)', 'EXECUTE')
      OR has_function_privilege('anon', 'public.can_befriend(uuid)', 'EXECUTE') THEN
     RAISE EXCEPTION 'anon can execute a new RLS helper';
@@ -174,6 +179,17 @@ BEGIN
   END;
   IF NOT refused THEN
     RAISE EXCEPTION 'user_blocks accepted a client-chosen created_at';
+  END IF;
+
+  refused := false;
+  BEGIN
+    INSERT INTO public.user_blocks (blocker_id, blocked_id)
+    VALUES (blocked_uid, blocked_uid);
+  EXCEPTION WHEN insufficient_privilege THEN
+    refused := true;
+  END;
+  IF NOT refused THEN
+    RAISE EXCEPTION 'a user blocked themselves';
   END IF;
 
   -- 4. Rejected media inserts do not name the parent's owner.

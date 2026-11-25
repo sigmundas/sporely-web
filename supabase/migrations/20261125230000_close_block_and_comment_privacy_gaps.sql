@@ -2,10 +2,13 @@
 -- scan (work package A in
 -- docs/plans/active/2026-11-25-security-scan-remaining-findings.md).
 --
--- 1. user_blocks: only the blocker reads a block row. The blocked side keeps
---    being filtered through the SECURITY DEFINER helpers is_blocked_between /
---    current_user_is_blocked_with and the people RPCs, none of which need the
---    caller to see the row.
+-- 1. user_blocks: only the blocker reads a block row, and nobody blocks
+--    themselves. The blocked side keeps being filtered through the SECURITY
+--    DEFINER helpers is_blocked_between / current_user_is_blocked_with and the
+--    people RPCs, none of which need the caller to see the row. Known residual:
+--    public helper RPCs (current_user_is_blocked_with, can_read_observation and
+--    the two added here) still answer "blocked either way or banned" for one
+--    known user id; moving RLS helpers out of the exposed schema is separate.
 -- 2. comments: the base-table SELECT policy now applies the same author
 --    filters as comments_community_view (author not banned, no block in either
 --    direction), so a direct table read returns no more than the view.
@@ -38,7 +41,7 @@ CREATE POLICY "Users can insert their own blocks"
   ON public.user_blocks
   FOR INSERT
   TO authenticated
-  WITH CHECK (auth.uid() = blocker_id);
+  WITH CHECK (auth.uid() = blocker_id AND blocker_id <> blocked_id);
 
 CREATE POLICY "Users can delete their own blocks"
   ON public.user_blocks
@@ -284,5 +287,9 @@ REVOKE ALL ON TABLE public.comments FROM authenticated;
 GRANT SELECT, DELETE ON TABLE public.comments TO authenticated;
 GRANT INSERT (observation_id, user_id, body, mentioned_user_ids) ON TABLE public.comments TO authenticated;
 GRANT UPDATE (body) ON TABLE public.comments TO authenticated;
+
+-- The id default calls nextval, which needs only USAGE; setval needs UPDATE.
+REVOKE ALL ON SEQUENCE public.comments_id_seq FROM anon, authenticated;
+GRANT USAGE ON SEQUENCE public.comments_id_seq TO authenticated;
 
 COMMIT;
