@@ -10,6 +10,7 @@ import {
   getIdentifyTopProbability,
   _renderServiceIcon,
   renderIdentifyResultRows,
+  renderIdentifyStatusMessage,
   renderIdentifyRedlistSummary,
   renderIdentifyProviderNotices,
   renderIdentifyServiceTab,
@@ -1797,14 +1798,17 @@ function _reviewAiResultsHtml() {
   const activeService = normalizeIdentifyService(reviewAiState.activeService || _resolveReviewPhotoIdServices(reviewAiState.availability).primary)
   const result = reviewAiState.resultsByService[activeService] || null
   if (result?.status === 'running' || result?.status === 'slow') {
-    return `<div class="ai-results-empty${result.status === 'slow' ? ' ai-results-slow' : ''}">${result.status === 'slow' ? result.errorMessage : t('common.loading')}</div>`
+    return renderIdentifyStatusMessage(
+      result.status === 'slow' ? result.errorMessage : t('common.loading'),
+      { slow: result.status === 'slow' },
+    )
   }
   if (!result?.predictions?.length) {
     if (result?.status === 'unavailable') {
-      return `<div class="ai-results-empty">${reviewAiState.availability?.[activeService]?.reason || result.errorMessage || (t('settings.inaturalistLoginMissing') || 'Unavailable')}</div>`
+      return renderIdentifyStatusMessage(reviewAiState.availability?.[activeService]?.reason || result.errorMessage || (t('settings.inaturalistLoginMissing') || 'Unavailable'))
     }
     if (result?.status === 'error' || result?.status === 'timeout') {
-      return `<div class="ai-results-empty">${result.errorMessage || (t('common.errorPrefix', { message: t('common.unknown') }) || 'Error')}</div>`
+      return renderIdentifyStatusMessage(result.errorMessage || (t('common.errorPrefix', { message: t('common.unknown') }) || 'Error'))
     }
     if (result?.status === 'no_match') {
       return `<div class="ai-results-empty">${getIdentifyNoMatchMessage(activeService)}</div>`

@@ -18,6 +18,7 @@ import {
   maybeLoadCachedIdentification,
   formatAiSuggestionDisplay,
   renderIdentifyResultRows,
+  renderIdentifyStatusMessage,
   renderIdentifyRedlistSummary,
   renderIdentifyServiceTab,
   renderIdentifyServiceStateSummary,
@@ -1332,4 +1333,39 @@ test('loadObservationRedlistSummaries skips queued placeholder observation ids',
   const empty = await loadObservationRedlistSummaries(['queued-18', 'draft'], { supabaseClient: client })
   assert.equal(empty.size, 0)
   assert.equal(calls.length, 0)
+})
+
+test('provider status text is escaped before it becomes result markup', () => {
+  // Artsorakel error messages embed an excerpt of the upstream response body.
+  const upstream = 'artsorakel endpoint status=502 body=<img src=x onerror="alert(1)">'
+
+  assert.equal(
+    renderIdentifyStatusMessage(upstream),
+    '<div class="ai-results-empty">artsorakel endpoint status=502 body=&lt;img src=x onerror=&quot;alert(1)&quot;&gt;</div>',
+  )
+  assert.equal(
+    renderIdentifyStatusMessage('Artsorakel is slow', { slow: true }),
+    '<div class="ai-results-empty ai-results-slow">Artsorakel is slow</div>',
+  )
+  assert.equal(renderIdentifyStatusMessage(undefined), '<div class="ai-results-empty"></div>')
+})
+
+// Lines that build the status element themselves from provider text, without
+// escaping it.
+function unescapedProviderStatusLines(source) {
+  return String(source).split('\n').filter(line =>
+    line.includes('ai-results-empty')
+    && /\$\{[^}]*(errorMessage|reason)\b/.test(line)
+    && !/\$\{\s*_esc\(/.test(line))
+}
+
+test('review screens do not put provider status text into result markup unescaped', () => {
+  assert.equal(
+    unescapedProviderStatusLines('return `<div class="ai-results-empty">${result.errorMessage || fallback}</div>`').length,
+    1,
+  )
+  for (const file of ['./screens/review.js', './screens/import_review.js', './screens/find_detail.js']) {
+    const source = fs.readFileSync(new URL(file, import.meta.url), 'utf8')
+    assert.deepEqual(unescapedProviderStatusLines(source), [], `${file} renders provider status text unescaped`)
+  }
 })

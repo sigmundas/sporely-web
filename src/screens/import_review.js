@@ -128,6 +128,7 @@ import {
   _renderPieSpinnerIcon,
   isTerminalAiServiceState,
   renderIdentifyResultRows,
+  renderIdentifyStatusMessage,
   renderIdentifyRedlistSummary,
   renderIdentifyProviderNotices,
   renderIdentifyServiceTab,
@@ -810,13 +811,16 @@ function _renderSessionAiResults(session) {
     return renderIdentifyResultRows(activeService, predictions)
   }
   if (serviceState.status === 'unavailable') {
-    return `<div class="ai-results-empty">${normalized.aiAvailability?.[activeService]?.reason || serviceState.errorMessage || (t('settings.inaturalistLoginMissing') || 'Unavailable')}</div>`
+    return renderIdentifyStatusMessage(normalized.aiAvailability?.[activeService]?.reason || serviceState.errorMessage || (t('settings.inaturalistLoginMissing') || 'Unavailable'))
   }
   if (serviceState.status === 'error' || serviceState.status === 'timeout') {
-    return `<div class="ai-results-empty">${serviceState.errorMessage || (t('common.errorPrefix', { message: t('common.unknown') }) || 'Error')}</div>`
+    return renderIdentifyStatusMessage(serviceState.errorMessage || (t('common.errorPrefix', { message: t('common.unknown') }) || 'Error'))
   }
   if (serviceState.status === 'running' || serviceState.status === 'slow') {
-    return `<div class="ai-results-empty${serviceState.status === 'slow' ? ' ai-results-slow' : ''}">${serviceState.status === 'slow' ? serviceState.errorMessage : (t('import.identifying') || t('common.loading'))}</div>`
+    return renderIdentifyStatusMessage(
+      serviceState.status === 'slow' ? serviceState.errorMessage : (t('import.identifying') || t('common.loading')),
+      { slow: serviceState.status === 'slow' },
+    )
   }
   if (serviceState.status === 'stale' || normalized.aiStale) {
     return `<div class="ai-results-empty">${t('review.resultsOutdated') || 'Results outdated'}</div>`
