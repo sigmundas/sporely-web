@@ -1,8 +1,10 @@
 # Remaining findings from the 2026-11-25 security scan
 
-Status: written 2026-11-25 as a handoff. Package B is implemented on branch
-`fix/bans-stop-writes` (migration `20261125233000`), not yet merged or
-deployed. Package A is done: PR #72, merged as
+Status: written 2026-11-25 as a handoff. Package B is done: PR #74, merged
+as `7811c8d`, migration `20261125233000` applied to production on 2026-11-25
+through the deploy tree (post-verify passed; a read-only catalog check
+confirmed the guard on all 20 tables and the comments read policy). Package A
+is done: PR #72, merged as
 `26c3779`, migration `20261125230000` applied to production on 2026-11-25
 through the deploy tree (post-verify passed; a read-only catalog check
 confirmed the policies, grants, view options and trigger functions). Nothing
@@ -25,6 +27,7 @@ Shipped from that scan:
 | #69 | `9f44459` | Escaped AI provider status text in the review screens, `/.well-known/security.txt`, HSTS on `app.sporely.no` |
 | #70 | `5374aab` | Migration `20261125210000`: an unfinished profile has no public name in five functions; friends list keeps a row for a friend without a public profile |
 | #72 | `26c3779` | Migration `20261125230000`: package A (block, comment and friendship access; media parent errors; view security_barrier) |
+| #74 | `7811c8d` | Migration `20261125233000`: package B (banned users cannot write content) |
 
 `20261125210000` is applied to production (remote head on 2026-11-25).
 
