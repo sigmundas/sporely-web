@@ -231,11 +231,18 @@ BEGIN
   PERFORM set_config('request.jwt.claims', json_build_object('role', 'anon')::text, true);
   PERFORM set_config('request.jwt.claim.sub', '', true);
 
-  SELECT count(*) INTO row_count
-  FROM public.comments
-  WHERE id = visible_comment_id;
-  IF row_count <> 0 THEN
-    RAISE EXCEPTION 'anon directly read comments through authenticated-only RLS';
+  -- Since 20261125230000 anon holds no privilege on the base table at all;
+  -- before that, authenticated-only RLS returned zero rows.
+  insert_denied := false;
+  BEGIN
+    SELECT count(*) INTO row_count
+    FROM public.comments
+    WHERE id = visible_comment_id;
+  EXCEPTION WHEN insufficient_privilege THEN
+    insert_denied := true;
+  END;
+  IF NOT insert_denied THEN
+    RAISE EXCEPTION 'anon could still query the comments base table (% rows)', row_count;
   END IF;
 
   SELECT count(*) INTO row_count

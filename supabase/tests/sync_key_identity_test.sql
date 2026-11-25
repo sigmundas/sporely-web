@@ -10,7 +10,7 @@
 --   * a retried insert is idempotent: 23505 naming the exact index, one row,
 --     and fetch-by-key returns the first insert, also for tombstoned images;
 --   * 23505 on the sync-key index is distinguishable from the old
---     desktop_id collision, from trg_01's foreign_key_violation and from a
+--     desktop_id collision, from trg_01's parent refusal (42501) and from a
 --     real foreign-key 23503;
 --   * rule 1 (no key change on UPDATE) for authenticated, service_role and
 --     postgres; rule 2 (no key + desktop_id) for authenticated only;
@@ -275,7 +275,7 @@ SELECT is(
 SELECT is(public._sk_test_outcome($$
   INSERT INTO public.observation_images (observation_id, user_id, image_type, storage_path, sync_key)
   VALUES (999999999, auth.uid(), 'field', auth.uid()::text || '/x.webp', gen_random_uuid())
-$$), '23503:', 'image with a missing parent is trg_01 foreign_key_violation (no constraint), not 23505');
+$$), '42501:', 'image with a missing parent is trg_01 insufficient_privilege (same as a foreign parent), not 23505');
 SELECT is(public._sk_test_outcome($$
   INSERT INTO public.observation_images (observation_id, user_id, image_type, storage_path, sync_key)
   VALUES ((SELECT v FROM fx WHERE k = 'obs_a'), auth.uid(), 'field',

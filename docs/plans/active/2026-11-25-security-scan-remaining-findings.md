@@ -1,8 +1,9 @@
 # Remaining findings from the 2026-11-25 security scan
 
-Status: written 2026-11-25 as a handoff. Nothing below is implemented and
-nothing is approved for implementation yet. Update this line when a work
-package lands; move the file to `completed/` when the list is empty.
+Status: written 2026-11-25 as a handoff. Package A is implemented on branch
+`fix/blocking-comment-privacy` (migration `20261125230000`), not yet merged or
+deployed. Nothing else is implemented. Update this line when a work package
+lands; move the file to `completed/` when the list is empty.
 
 Written for an agent that has not seen the session that produced it.
 
@@ -117,6 +118,39 @@ Line numbers are as of `5374aab`; trust the function name over the number.
 6. **Comment inserts accept a client-chosen `id` and `created_at`.**
    `20261119130000` restricted UPDATE only. Fix: `GENERATED ALWAYS` id and a
    column-level INSERT grant. Scout-reported; verify before changing.
+
+Outcome of A (2026-11-25, reviewed by a Codex challenge and the
+`sporely-security-reviewer` agent; `block_and_comment_privacy_test.sql`):
+all six items are closed as written, plus: self-blocks are refused, anon has
+no privileges on `comments` or `user_blocks`, and `comments_id_seq` is
+`USAGE` for authenticated only. Left open, each worth its own change:
+
+- **Block status is still testable for one known user id.** The RLS helpers
+  are public RPCs: `current_user_is_blocked_with`, `can_read_observation`, and
+  the two added by A (`comment_author_is_visible`, `can_befriend`) answer
+  "blocked either way or banned". Listing every blocker is closed; testing a
+  known id is not. Bidirectional filtering also shows a block by design.
+  Fix: move all RLS helpers to a schema PostgREST does not expose, granting
+  `USAGE` and `EXECUTE` to the roles whose policies call them.
+- **Blocking does not end friendships.** No trigger on `user_blocks`. An
+  accepted friendship stays accepted (every current `are_friends` caller
+  checks blocks first, so nothing leaks today) and comes back after an
+  unblock; a pending request from the blocker stays visible to the blocked
+  user, and accepting it now fails with an RLS error. Fix (deletes data; owner
+  decision): an AFTER INSERT trigger on `user_blocks` that deletes the pair's
+  `friendships` rows.
+- **Landing comment edits always fail.** `updateOwnComment` in
+  `sporely-landing/src/lib/communityApi.ts` sends `mentioned_user_ids`, but
+  only `body` is updatable since `20261119130000`. Fix in the landing repo:
+  send only `body`.
+- `observation_shares: owner full` checks `owner_id` only, so a user can
+  create a share row for someone else's observation id. Nothing reads shares
+  for access today; check before relying on them.
+- `reports` INSERT checks only the reporter, so a report against an existing
+  private observation succeeds where a missing id fails its foreign key. Ids
+  are sequential, so this tells little.
+- A banned user can no longer edit or delete their own comments (the read
+  policy applies to UPDATE/DELETE). Consistent with B.
 
 ### B. Bans stop writes
 

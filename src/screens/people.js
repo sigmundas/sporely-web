@@ -305,17 +305,19 @@ async function _enrichWithSignedUrls(people) {
   return people
 }
 
+// Only the caller's own blocks are readable; who blocked the caller stays
+// server-side. search_people_directory filters both directions; this fallback
+// can only hide the people the caller blocked.
 async function _loadBlockedPeopleIds() {
   if (!state.user?.id) return new Set()
   const { data, error } = await supabase
     .from('user_blocks')
-    .select('blocker_id, blocked_id')
-    .or(`blocker_id.eq.${state.user.id},blocked_id.eq.${state.user.id}`)
+    .select('blocked_id')
+    .eq('blocker_id', state.user.id)
   if (error) throw error
   const blocked = new Set()
   for (const row of data || []) {
-    if (row.blocker_id === state.user.id && row.blocked_id) blocked.add(row.blocked_id)
-    if (row.blocked_id === state.user.id && row.blocker_id) blocked.add(row.blocker_id)
+    if (row.blocked_id) blocked.add(row.blocked_id)
   }
   return blocked
 }
