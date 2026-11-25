@@ -31,8 +31,9 @@
 --   4     the block row is still returned (so it can be unblocked) with NULL
 --         username and display_name;
 --   5     new revisions carry the neutral label 'Sporely user'. Envelopes
---         already stored are not rewritten; production has none from an
---         unfinished account.
+--         already stored are immutable and are served as stored, so this
+--         migration refuses to apply if an unfinished account already owns
+--         a shared-reference contribution (see the guard below).
 --
 -- The owner still reads their own row through the owner-only profiles table,
 -- so the setup screen keeps its prefill. Signatures, return types,
@@ -45,6 +46,27 @@
 -- author lookups, the same way a banned or blocked account already does not.
 
 BEGIN;
+
+-- Rollout guard for path 5. A stored contribution envelope keeps the label it
+-- was written with and the public readers return it unchanged, so changing
+-- the envelope function cannot retract a seeded username that is already
+-- published. Fail here, before anything changes, rather than report the
+-- path closed while such a label is still being served.
+DO $$
+DECLARE
+  v_count bigint;
+BEGIN
+  SELECT count(*) INTO v_count
+  FROM private.shared_reference_contributions c
+  JOIN public.profiles p ON p.id = c.owner_id
+  WHERE p.profile_completed_at IS NULL;
+  IF v_count > 0 THEN
+    RAISE EXCEPTION
+      '% shared-reference contribution(s) belong to an account that has not finished profile setup; their stored envelopes may carry a seeded username. Resolve those before applying 20261125210000.',
+      v_count;
+  END IF;
+END
+$$;
 
 CREATE OR REPLACE FUNCTION public.read_public_profiles()
 RETURNS TABLE (
