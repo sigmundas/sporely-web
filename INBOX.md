@@ -43,3 +43,4 @@
     - `src/sync-queue.js` opens a new IndexedDB connection per operation and never closes it.
     - Legacy `search_taxa` limits distinct taxa, but returns a taxon once per preferred vernacular name in the language, so results can exceed the limit.
   - Stale code: committed `.pyc` files, dead exports, Deno `.ts` tests that CI never runs, and documentation drift.
+- **Remaining findings from the 2026-11-25 security scan** (Claude plus a Codex challenge at `703fe99`; #69 and #70 shipped from it) are listed, grouped into work packages, in [docs/plans/active/2026-11-25-security-scan-remaining-findings.md](docs/plans/active/2026-11-25-security-scan-remaining-findings.md). Several overlap with the block above; the plan says which.
