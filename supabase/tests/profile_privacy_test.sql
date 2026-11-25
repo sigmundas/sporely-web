@@ -1,7 +1,9 @@
 -- Regression coverage for the owner-only profiles table and the narrow
 -- public_profiles projection introduced by
 -- 20260812120000_owner_only_profiles_and_public_projection.sql, including
--- its banned-profile and bidirectional-block visibility rules.
+-- its banned-profile and bidirectional-block visibility rules. The fixtures
+-- are established profiles (profile_completed_at set); unfinished profiles
+-- are covered by unfinished_profile_privacy_test.sql.
 
 BEGIN;
 
@@ -31,32 +33,32 @@ BEGIN
   INSERT INTO public.profiles (
     id, username, display_name, avatar_url, bio,
     cloud_plan, is_pro, is_admin, is_banned, billing_customer_id,
-    storage_used_bytes, last_client, last_client_seen_at
+    storage_used_bytes, last_client, last_client_seen_at, profile_completed_at
   ) VALUES
     (
       owner_id, 'profile_owner', 'Profile Owner', 'https://example.test/owner.png', 'Owner bio',
       'pro', true, true, false, 'cus_private_owner',
-      12345, 'desktop_app', now()
+      12345, 'desktop_app', now(), now()
     ),
     (
       other_id, 'profile_other', 'Profile Other', 'https://example.test/other.png', 'Other bio',
       'free', false, false, false, 'cus_private_other',
-      67890, 'web_browser', now()
+      67890, 'web_browser', now(), now()
     ),
     (
       blocked_by_viewer_id, 'profile_blocked', 'Blocked By Viewer', NULL, NULL,
       'free', false, false, false, NULL,
-      0, NULL, NULL
+      0, NULL, NULL, now()
     ),
     (
       blocks_viewer_id, 'profile_blocker', 'Blocks Viewer', NULL, NULL,
       'free', false, false, false, NULL,
-      0, NULL, NULL
+      0, NULL, NULL, now()
     ),
     (
       banned_id, 'profile_banned', 'Banned Profile', NULL, NULL,
       'free', false, false, true, NULL,
-      0, NULL, NULL
+      0, NULL, NULL, now()
     )
   ON CONFLICT (id) DO UPDATE SET
     username = EXCLUDED.username,
@@ -70,7 +72,8 @@ BEGIN
     billing_customer_id = EXCLUDED.billing_customer_id,
     storage_used_bytes = EXCLUDED.storage_used_bytes,
     last_client = EXCLUDED.last_client,
-    last_client_seen_at = EXCLUDED.last_client_seen_at;
+    last_client_seen_at = EXCLUDED.last_client_seen_at,
+    profile_completed_at = EXCLUDED.profile_completed_at;
 
   INSERT INTO public.user_blocks (blocker_id, blocked_id)
   VALUES

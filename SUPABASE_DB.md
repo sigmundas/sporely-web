@@ -63,6 +63,7 @@ This repository owns the W2–W5 cloud and web implementation described there.
 - `get_blocked_user_profiles()` (RPC)
   - Returns `blocked_id`, `username`, `display_name`, `avatar_url`, block `created_at` for the caller's own `user_blocks` rows only (`blocker_id = auth.uid()`)
   - Exists because `public_profiles` / `read_public_profiles` hides blocked pairs, so a blocker could not otherwise resolve names in their own block list
+  - `username` and `display_name` are `NULL` for a blocked account that has not finished setup (`20261125210000`); the row is still returned so the block can be removed
   - `SECURITY DEFINER`, `search_path = 'public'`, granted to `authenticated` / `service_role` only (anon cannot execute). Accepted residual disclosure: shows current identity of blocked users even if banned or blocking back, so the user can recognize whom to unblock
   - Added by `20260824140000_get_blocked_user_profiles_rpc.sql`; consumed by the web Profile "Friends | Blocked users" pill (`src/screens/profile.js`)
 - `reports`
@@ -78,6 +79,12 @@ This repository owns the W2–W5 cloud and web implementation described there.
   - Clients can only read and update their own row: `authenticated` has no `INSERT` or `DELETE` on `profiles` (since `20261118120000`), so the `BEFORE UPDATE` trigger cannot be sidestepped by deleting and re-inserting the row. Creation is the `on_auth_user_created` trigger; deletion is the `delete-account` Edge Function
   - `bio` is used by the web Profile editor and the People screen cards
   - Avatar initials derived from `username` or `email` on the client
+- `public_profiles` (view over `read_public_profiles()`)
+  - The only way a client reads another user's `id`, `username`, `display_name`, `avatar_url`, `bio`; selectable by `anon` and `authenticated`
+  - Returns a profile only when it is not banned, not in a block relationship with the caller, and has finished setup (`profile_completed_at IS NOT NULL`, since `20261125210000`)
+  - The signup trigger seeds `username` from the email local part and `display_name` from the provider's full name as a prefill for the setup screen. Those values are not public until the owner completes setup, so an unfinished account does not resolve to a name anywhere (friend lists, friend requests, mention search, author lookups)
+  - The same rule holds wherever a name leaves the `profiles` table (all since `20261125210000`): `community_contributor_label` falls back to the observation's `author`, `get_blocked_user_profiles()` returns the block row with `NULL` names, and a shared reference's contributor label is `Sporely user`
+  - Tests: `supabase/tests/profile_privacy_test.sql`, `supabase/tests/unfinished_profile_privacy_test.sql`
 - `friendships`
   - Bidirectional friendship rows with status gating: `pending` / `accepted` / `blocked`
   - Columns: `requester_id` (uuid), `addressee_id` (uuid), `status`
@@ -222,6 +229,7 @@ Full staged design and progress notes: [sporely-py/docs/spore-statistics-species
   - Returns profile fields plus public `finds / species / spores` contributor counts
   - Default behavior: recently active public contributors
   - Search behavior: matches `username` / `display_name`, still returning public stats only
+  - Executable by `anon`. Applies the same visibility rules as `public_profiles`: no banned, blocked-pair or unfinished profiles (`20261125210000`)
 
 ### Edge Functions
 - `delete-account`
