@@ -8,6 +8,11 @@
 // STAGE ORDER (children before parents; R2 objects before DB rows; auth
 // user last):
 //
+//   0. sweep_preflight           — ask the worker's sweep route before
+//                                   anything is deleted; it must answer
+//                                   409 profile_exists (or sweep, on a
+//                                   retry). Stops a deletion that could
+//                                   not finish its last media step.
 //   1. media_snapshot            — record R2 media keys BEFORE any DB row
 //                                   is deleted. Reads BOTH
 //                                   observation_images.storage_path (which
@@ -169,6 +174,29 @@ function lastRowId(label, rows) {
 
 /** @type {readonly Stage[]} */
 export const STAGES = Object.freeze([
+  {
+    // Nothing is deleted unless the worker can finish the job: a worker
+    // without the sweep route (404), without its profile lookup (503), or
+    // unreachable would otherwise fail sweep_r2_prefix only after the
+    // profile is gone, leaving an account that can neither upload nor
+    // finish setup. A live account gets 409 profile_exists; a retry after
+    // delete_profile gets a real (harmless) sweep.
+    name: 'sweep_preflight',
+    apply: async ctx => {
+      let outcome
+      try {
+        outcome = await ctx.worker.sweepAccountMedia()
+      } catch (err) {
+        outcome = { ok: false, detail: err?.message }
+      }
+      if (outcome?.ok) return { ok: true }
+      if (outcome?.status === 409 && outcome?.detail === 'profile_exists') return { ok: true }
+      return {
+        ok: false,
+        error: `media sweep not ready: ${outcome?.detail || outcome?.status || 'unknown'}`,
+      }
+    },
+  },
   {
     name: 'media_snapshot',
     apply: async ctx => {
