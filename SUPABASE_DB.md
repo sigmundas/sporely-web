@@ -78,6 +78,11 @@ This repository owns the W2–W5 cloud and web implementation described there.
   - Clients can only read and update their own row: `authenticated` has no `INSERT` or `DELETE` on `profiles` (since `20261118120000`), so the `BEFORE UPDATE` trigger cannot be sidestepped by deleting and re-inserting the row. Creation is the `on_auth_user_created` trigger; deletion is the `delete-account` Edge Function
   - `bio` is used by the web Profile editor and the People screen cards
   - Avatar initials derived from `username` or `email` on the client
+- `public_profiles` (view over `read_public_profiles()`)
+  - The only way a client reads another user's `id`, `username`, `display_name`, `avatar_url`, `bio`; selectable by `anon` and `authenticated`
+  - Returns a profile only when it is not banned, not in a block relationship with the caller, and has finished setup (`profile_completed_at IS NOT NULL`, since `20261125210000`)
+  - The signup trigger seeds `username` from the email local part and `display_name` from the provider's full name as a prefill for the setup screen. Those values are not public until the owner completes setup, so an unfinished account does not resolve to a name anywhere (friend lists, friend requests, mention search, author lookups)
+  - Tests: `supabase/tests/profile_privacy_test.sql`, `supabase/tests/unfinished_profile_privacy_test.sql`
 - `friendships`
   - Bidirectional friendship rows with status gating: `pending` / `accepted` / `blocked`
   - Columns: `requester_id` (uuid), `addressee_id` (uuid), `status`
@@ -222,6 +227,7 @@ Full staged design and progress notes: [sporely-py/docs/spore-statistics-species
   - Returns profile fields plus public `finds / species / spores` contributor counts
   - Default behavior: recently active public contributors
   - Search behavior: matches `username` / `display_name`, still returning public stats only
+  - Executable by `anon`. Applies the same visibility rules as `public_profiles`: no banned, blocked-pair or unfinished profiles (`20261125210000`)
 
 ### Edge Functions
 - `delete-account`
