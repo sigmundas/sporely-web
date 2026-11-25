@@ -4,8 +4,14 @@
 --     sporely_account_suspended), also through a client RPC;
 --   * DELETE still works, including the foreign-key SET NULL it causes on
 --     another user's report;
---   * a tombstone update (deleted_at only) still works; a tombstone that also
---     changes another column does not;
+--   * a tombstone update still works (deleted_at only, or with the
+--     row_version and updated_at bumps the reference sync RPCs make); a
+--     tombstone that also changes another column, and an updated_at-only
+--     update, do not;
+--   * a banned author can still delete their own comment;
+--   * a signed-in user without a profile row is refused;
+--   * the guard runs after trg_000_sync_brake (obsolete desktops get the
+--     upgrade answer first) and before the triggers that rewrite NEW;
 --   * record_client_activity still records the activity columns on profiles;
 --   * blocking another user still works;
 -- and that a user who is not banned, a service-role/owner write and the same
@@ -40,6 +46,26 @@ END
 $$;
 GRANT EXECUTE ON FUNCTION pg_temp.expect_suspended(text, text) TO authenticated;
 
+-- Writes a reference tombstone exactly like sync_reference_work does: as a
+-- SECURITY DEFINER function, with the caller's auth.uid(), bumping row_version
+-- and updated_at.
+CREATE FUNCTION pg_temp.tombstone_reference_work(p_id uuid)
+  RETURNS bigint
+  LANGUAGE plpgsql
+  SECURITY DEFINER
+AS $$
+DECLARE
+  n bigint;
+BEGIN
+  UPDATE public.reference_works
+     SET deleted_at = clock_timestamp(), row_version = row_version + 1, updated_at = clock_timestamp()
+   WHERE id = p_id AND user_id = auth.uid();
+  GET DIAGNOSTICS n = ROW_COUNT;
+  RETURN n;
+END
+$$;
+GRANT EXECUTE ON FUNCTION pg_temp.tombstone_reference_work(uuid) TO authenticated;
+
 DO $$
 DECLARE
   banned_id uuid := '00000000-0000-4000-8000-0000001125b1';
@@ -50,6 +76,9 @@ DECLARE
   img_banned  bigint := 881125233011;
   img_banned2 bigint := 881125233012;
   report_on_banned uuid;
+  ref_work uuid := '00000000-0000-4000-8000-0000001125c1';
+  own_comment bigint := 881125233021;
+  ghost_id uuid := '00000000-0000-4000-8000-0000001125b3';
   covered text[] := ARRAY[
     'calibrations', 'comments', 'follows', 'friendships',
     'observation_identifications', 'observation_images',
@@ -68,10 +97,29 @@ BEGIN
   WHERE NOT EXISTS (
     SELECT 1 FROM pg_trigger tr
     WHERE tr.tgrelid = ('public.' || t)::regclass
-      AND tr.tgname = 'aab_refuse_banned_writer'
+      AND tr.tgname = 'trg_000_writer_not_banned'
       AND tr.tgenabled = 'O');
   IF missing IS NOT NULL THEN
-    RAISE EXCEPTION 'aab_refuse_banned_writer missing on %', missing;
+    RAISE EXCEPTION 'trg_000_writer_not_banned missing on %', missing;
+  END IF;
+
+  -- Order: after trg_000_sync_brake, before every other trigger that is not
+  -- one of the known raise-or-skip guards.
+  IF EXISTS (
+    SELECT 1 FROM pg_trigger tr
+    WHERE tr.tgname = 'trg_000_sync_brake'
+      AND NOT ('trg_000_sync_brake' COLLATE "C" < 'trg_000_writer_not_banned' COLLATE "C")
+  ) OR EXISTS (
+    SELECT 1 FROM pg_trigger tr
+    WHERE NOT tr.tgisinternal AND (tr.tgtype & 2) = 2
+      AND tr.tgrelid IN (SELECT tgrelid FROM pg_trigger WHERE tgname = 'trg_000_writer_not_banned')
+      AND (tr.tgname COLLATE "C") < 'trg_000_writer_not_banned'
+      AND tr.tgname NOT IN ('aaa_sync_client_write_block', 'trg_000_sync_brake',
+        'enforce_non_public_observation_limit_trigger', 'guard_selected_sporely_taxon_id_v2_trg',
+        'observation_taxon_shared_reference_rate_row_trg', 'observation_taxon_shared_reference_rate_trg',
+        'profile_shared_contribution_anonymize_trg')
+  ) THEN
+    RAISE EXCEPTION 'an unreviewed BEFORE trigger runs ahead of trg_000_writer_not_banned';
   END IF;
 
   ---------------------------------------------------------------------------
@@ -101,6 +149,18 @@ BEGIN
   OVERRIDING SYSTEM VALUE
   VALUES (img_banned,  obs_banned, banned_id, 'field', banned_id::text || '/a.webp'),
          (img_banned2, obs_banned, banned_id, 'field', banned_id::text || '/b.webp');
+
+  INSERT INTO public.reference_works (id, user_id, type, title, short_label, revision)
+  VALUES (ref_work, banned_id, 'book', 'Fixture work', 'Fixture', 1);
+
+  INSERT INTO public.comments (id, observation_id, user_id, body)
+  VALUES (own_comment, obs_normal, banned_id, 'written before the ban');
+
+  -- A signed-in account whose profile is already gone (deletion in progress).
+  INSERT INTO auth.users (id, aud, role, email, raw_user_meta_data, created_at, updated_at)
+  VALUES (ghost_id, 'authenticated', 'authenticated', 'buw-ghost@example.test', '{}'::jsonb, now(), now())
+  ON CONFLICT (id) DO NOTHING;
+  DELETE FROM public.profiles WHERE id = ghost_id;
 
   -- Owner/service writes are not affected by the ban (auth.uid() is NULL).
   UPDATE public.observations SET notes = 'service edit' WHERE id = obs_banned;
@@ -137,11 +197,27 @@ BEGIN
     $q$UPDATE public.observation_images SET deleted_at = now(), image_type = 'microscope' WHERE id = %s$q$,
     img_banned2), 'tombstone plus another change');
 
+  PERFORM pg_temp.expect_suspended(format(
+    $q$UPDATE public.observations SET updated_at = now() - interval '1 day' WHERE id = %s$q$,
+    obs_banned), 'updated_at-only update');
+
   -- Allowed: tombstone only.
   UPDATE public.observation_images SET deleted_at = now() WHERE id = img_banned;
   GET DIAGNOSTICS n = ROW_COUNT;
   IF n <> 1 THEN
     RAISE EXCEPTION 'banned user could not tombstone their own image';
+  END IF;
+
+  -- Allowed: a reference tombstone the way the sync RPCs write it.
+  IF pg_temp.tombstone_reference_work(ref_work) <> 1 THEN
+    RAISE EXCEPTION 'banned user could not tombstone their own reference work';
+  END IF;
+
+  -- Allowed: deleting their own comment.
+  DELETE FROM public.comments WHERE id = own_comment;
+  GET DIAGNOSTICS n = ROW_COUNT;
+  IF n <> 1 THEN
+    RAISE EXCEPTION 'banned author could not delete their own comment';
   END IF;
 
   -- Allowed: activity ping.
@@ -181,6 +257,18 @@ BEGIN
   IF (SELECT observation_id FROM public.reports WHERE id = report_on_banned) IS NOT NULL THEN
     RAISE EXCEPTION 'the delete did not cascade SET NULL to the report';
   END IF;
+
+  ---------------------------------------------------------------------------
+  -- A signed-in account without a profile row
+  ---------------------------------------------------------------------------
+  SET LOCAL ROLE authenticated;
+  PERFORM set_config('request.jwt.claims', json_build_object('sub', ghost_id::text, 'role', 'authenticated')::text, true);
+  PERFORM set_config('request.jwt.claim.sub', ghost_id::text, true);
+
+  PERFORM pg_temp.expect_suspended(format(
+    $q$INSERT INTO public.follows (user_id, target_type, target_id) VALUES (%L, 'user', %L)$q$,
+    ghost_id, normal_id), 'insert follow without a profile');
+  RESET ROLE;
 
   ---------------------------------------------------------------------------
   -- A user who is not banned

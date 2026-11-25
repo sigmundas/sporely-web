@@ -377,23 +377,16 @@ SELECT results_eq(
        AND c.oid IN (SELECT tgrelid FROM pg_trigger WHERE tgname = 'trg_000_sync_brake')
      ORDER BY 1, 2$$,
   $$VALUES ('observation_images', 'aaa_sync_client_write_block'),
-           ('observation_images', 'aab_refuse_banned_writer'),
            ('observation_reference_uses', 'aaa_sync_client_write_block'),
-           ('observation_reference_uses', 'aab_refuse_banned_writer'),
            ('observation_spore_summaries', 'aaa_sync_client_write_block'),
-           ('observation_spore_summaries', 'aab_refuse_banned_writer'),
            ('observations', 'aaa_sync_client_write_block'),
-           ('observations', 'aab_refuse_banned_writer'),
            ('observations', 'enforce_non_public_observation_limit_trigger'),
            ('observations', 'guard_selected_sporely_taxon_id_v2_trg'),
            ('observations', 'observation_taxon_shared_reference_rate_row_trg'),
            ('spore_measurement_mosaic_tiles', 'aaa_sync_client_write_block'),
-           ('spore_measurement_mosaic_tiles', 'aab_refuse_banned_writer'),
            ('spore_measurement_mosaics', 'aaa_sync_client_write_block'),
-           ('spore_measurement_mosaics', 'aab_refuse_banned_writer'),
-           ('spore_measurements', 'aaa_sync_client_write_block'),
-           ('spore_measurements', 'aab_refuse_banned_writer')$$,
-  'only the write stop, the banned-writer refusal and the three known raise-or-skip BEFORE row triggers fire before trg_000_sync_brake');
+           ('spore_measurements', 'aaa_sync_client_write_block')$$,
+  'only the write stop and the three known raise-or-skip BEFORE row triggers fire before trg_000_sync_brake');
 
 -- ---------------------------------------------------------------
 -- 2. Shipped desktop: every write on every braked table is refused.
