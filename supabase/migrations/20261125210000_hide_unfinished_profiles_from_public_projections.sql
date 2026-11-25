@@ -1,4 +1,4 @@
--- Keep unfinished profiles out of the public profile projections.
+-- A profile's seeded identity is not public until its owner finishes setup.
 --
 -- handle_new_user() seeds every new profile with username = the local part
 -- of the sign-up email and display_name = the identity provider's full name
@@ -6,20 +6,38 @@
 -- the user has not seen or accepted them until the setup save sets
 -- profile_completed_at (20260805130000).
 --
--- Both public projections returned the seeded row anyway:
+-- Five functions returned the seeded values to someone other than the owner:
 --
---   * search_people_directory(integer, integer, text) -- executable by anon
---   * read_public_profiles(), behind the public_profiles view -- selectable
---     by anon
+--   1. search_people_directory(integer, integer, text) -- executable by anon;
+--      listed every unfinished account.
+--   2. read_public_profiles(), behind the public_profiles view -- selectable
+--      by anon; same listing.
+--   3. community_contributor_label(uuid, text) -- executable by anon; returned
+--      display_name / username for any profile id, and labels public
+--      observations (observer name, and the name filter of
+--      search_public_observations).
+--   4. get_blocked_user_profiles() -- a signed-in user can block any id
+--      (user_blocks only checks blocker_id) and then read its names.
+--   5. private.shared_reference_contribution_envelope(...) -- writes the
+--      username into the contributor label of a publicly shared reference.
+--      Sharing is on by default (20261001113007), so an account that only
+--      ever used the desktop app would publish its email local part.
 --
--- so a signed-out caller could page through every account that had signed up
--- and never finished setup, and read its email local part and provider name.
+-- Each now treats an unfinished profile as having no public name:
 --
--- A profile is now public only once its owner has completed setup. The owner
--- still reads their own row through the owner-only profiles table, so the
--- setup screen keeps its prefill. Nothing else about either function changes:
--- signature, return type, search_path, ownership and grants are untouched
--- (CREATE OR REPLACE preserves the ACL), and public_profiles keeps reading
+--   1, 2  the row is not returned;
+--   3     the label falls back to fallback_author, as it does for a missing
+--         profile;
+--   4     the block row is still returned (so it can be unblocked) with NULL
+--         username and display_name;
+--   5     new revisions carry the neutral label 'Sporely user'. Envelopes
+--         already stored are not rewritten; production has none from an
+--         unfinished account.
+--
+-- The owner still reads their own row through the owner-only profiles table,
+-- so the setup screen keeps its prefill. Signatures, return types,
+-- search_path, ownership and grants are untouched (CREATE OR REPLACE
+-- preserves the ACL), and public_profiles keeps reading
 -- read_public_profiles().
 --
 -- Effect on signed-in users: an account that has not finished setup no longer
@@ -145,6 +163,146 @@ AS $$
     vps.id ASC
   LIMIT (SELECT lim FROM normalized)
   OFFSET (SELECT off FROM normalized);
+$$;
+
+-- 3. Author label. An unfinished profile contributes no name, so the label
+--    falls back to fallback_author exactly as it does when no profile exists.
+CREATE OR REPLACE FUNCTION public.community_contributor_label(
+  profile_id uuid,
+  fallback_author text DEFAULT NULL::text
+)
+RETURNS text
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path TO 'public'
+AS $$
+  SELECT nullif(
+    coalesce(
+      CASE WHEN p.profile_completed_at IS NOT NULL THEN nullif(p.display_name, '') END,
+      CASE WHEN p.profile_completed_at IS NOT NULL THEN nullif(p.username, '') END,
+      nullif(fallback_author, '')
+    ),
+    ''
+  )
+  FROM public.profiles p
+  WHERE p.id = profile_id
+  UNION ALL
+  SELECT nullif(fallback_author, '')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM public.profiles p WHERE p.id = profile_id
+  )
+  LIMIT 1
+$$;
+
+-- 4. The caller's own block list. The row stays, so the block can be
+--    recognised by date and removed; an unfinished profile has no name.
+CREATE OR REPLACE FUNCTION public.get_blocked_user_profiles()
+RETURNS TABLE (
+  blocked_id   uuid,
+  username     text,
+  display_name text,
+  avatar_url   text,
+  created_at   timestamptz
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path TO 'public'
+AS $$
+  SELECT
+    ub.blocked_id,
+    CASE WHEN p.profile_completed_at IS NOT NULL THEN p.username END,
+    CASE WHEN p.profile_completed_at IS NOT NULL THEN p.display_name END,
+    p.avatar_url,
+    ub.created_at
+  FROM public.user_blocks ub
+  JOIN public.profiles p ON p.id = ub.blocked_id
+  WHERE ub.blocker_id = auth.uid()
+  ORDER BY ub.created_at DESC;
+$$;
+
+-- 5. Contributor label of a shared reference. Body is the reviewed
+--    20260930224506 definition with one added branch: an unfinished profile
+--    is labelled 'Sporely user'.
+CREATE OR REPLACE FUNCTION private.shared_reference_contribution_envelope(
+  p_contribution_id uuid,
+  p_revision integer,
+  p_taxon_id integer,
+  p_canonical_name text,
+  p_owner_id uuid,
+  p_snapshot jsonb,
+  p_candidate jsonb,
+  p_shared_at timestamptz
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_work jsonb := p_candidate->'work';
+  v_citation jsonb;
+  v_exports jsonb;
+  v_label text;
+  v_citation_key text := 'sporely-contribution-' || pg_catalog.replace(p_contribution_id::text, '-', '');
+BEGIN
+  IF p_contribution_id IS NULL OR p_revision < 1 OR p_taxon_id < 1
+     OR pg_catalog.jsonb_typeof(p_snapshot) <> 'object'
+     OR pg_catalog.jsonb_typeof(v_work) <> 'object' THEN
+    RETURN NULL;
+  END IF;
+  SELECT CASE
+           WHEN p.profile_completed_at IS NULL THEN 'Sporely user'
+           WHEN nullif(pg_catalog.btrim(p.username), '') IS NULL THEN 'Sporely user'
+           WHEN p.username LIKE '%@%' THEN 'Sporely user'
+           ELSE p.username
+         END
+    INTO v_label
+    FROM public.profiles p
+   WHERE p.id=p_owner_id;
+  p_snapshot := p_snapshot || pg_catalog.jsonb_build_object(
+    'reference_work_id', extensions.uuid_generate_v5(
+      '6ba7b810-9dad-11d1-80b4-00c04fd430c8'::uuid,
+      p_contribution_id::text || ':work'
+    ),
+    'reference_treatment_id', extensions.uuid_generate_v5(
+      '6ba7b810-9dad-11d1-80b4-00c04fd430c8'::uuid,
+      p_contribution_id::text || ':treatment'
+    ),
+    'reference_measurement_set_id', p_contribution_id,
+    'reference_revision', p_revision
+  );
+  v_citation := v_work || pg_catalog.jsonb_build_object(
+    'schema_version', 1,
+    'citation_key', v_citation_key,
+    'short_citation', p_snapshot->'short_label',
+    'full_citation', p_snapshot->'full_citation'
+  );
+  v_exports := private.reference_curated_build_citation_exports(
+    v_citation, p_contribution_id
+  );
+  RETURN pg_catalog.jsonb_build_object(
+    'contribution_id', p_contribution_id,
+    'revision', p_revision,
+    'status', 'shared',
+    'shared_at', p_shared_at,
+    'sporely_taxon_id', p_taxon_id,
+    'canonical_scientific_name', p_canonical_name,
+    'contributor', pg_catalog.jsonb_build_object(
+      'id', NULL,
+      'label', coalesce(nullif(pg_catalog.btrim(v_label), ''), 'Sporely user')
+    ),
+    'snapshot', p_snapshot,
+    'citation', v_citation,
+    'exports', pg_catalog.jsonb_build_object(
+      'plain_text', v_exports->>'plain_text',
+      'bibtex', v_exports->>'bibtex',
+      'csl_json', (v_exports->>'csl_json')::jsonb
+    )
+  );
+EXCEPTION WHEN OTHERS THEN
+  RETURN NULL;
+END
 $$;
 
 COMMENT ON FUNCTION public.read_public_profiles() IS

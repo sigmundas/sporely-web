@@ -146,8 +146,8 @@ BEGIN
     (a,'authenticated','authenticated','fork-contrib-a@example.invalid','{}',now(),now()),
     (b,'authenticated','authenticated','fork-contrib-b@example.invalid','{}',now(),now()),
     (c,'authenticated','authenticated','fork-contrib-c@example.invalid','{}',now(),now());
-  INSERT INTO public.profiles(id,username,is_banned) VALUES
-    (a,'fork_contrib_a',false),(b,'fork_contrib_b',false),(c,'fork_contrib_c',false);
+  INSERT INTO public.profiles(id,username,is_banned,profile_completed_at) VALUES
+    (a,'fork_contrib_a',false,now()),(b,'fork_contrib_b',false,now()),(c,'fork_contrib_c',false,now());
   INSERT INTO taxonomy_v3.registry_concept(
     sporely_taxon_id,canonical_name,rank,scope_state,cache_state,first_materialized_from_release
   ) VALUES (t,'Cortinarius copiatus','species','include','in_cache','fork-contrib-test'),

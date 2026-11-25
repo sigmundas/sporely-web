@@ -31,17 +31,18 @@ BEGIN
   INSERT INTO public.profiles (
     id, username, display_name, avatar_url, bio,
     cloud_plan, is_pro, is_admin, is_banned, billing_customer_id,
-    storage_used_bytes, last_client, last_client_seen_at
+    storage_used_bytes, last_client, last_client_seen_at, profile_completed_at
   ) VALUES
-    (v_blocker_id, 'rpc_blocker',   'Blocker User',   NULL,                           NULL, 'free', false, false, false, NULL, 0, NULL, NULL),
-    (v_blocked_id, 'rpc_blocked',   'Blocked User',   'https://example.test/b.png',   NULL, 'free', false, false, false, NULL, 0, NULL, NULL),
-    (v_other_id,   'rpc_other',     'Other User',     NULL,                           NULL, 'free', false, false, false, NULL, 0, NULL, NULL),
-    (v_banned_id,  'rpc_banned',    'Banned Blocked', NULL,                           NULL, 'free', false, false, true,  NULL, 0, NULL, NULL)
+    (v_blocker_id, 'rpc_blocker',   'Blocker User',   NULL,                           NULL, 'free', false, false, false, NULL, 0, NULL, NULL, now()),
+    (v_blocked_id, 'rpc_blocked',   'Blocked User',   'https://example.test/b.png',   NULL, 'free', false, false, false, NULL, 0, NULL, NULL, now()),
+    (v_other_id,   'rpc_other',     'Other User',     NULL,                           NULL, 'free', false, false, false, NULL, 0, NULL, NULL, now()),
+    (v_banned_id,  'rpc_banned',    'Banned Blocked', NULL,                           NULL, 'free', false, false, true,  NULL, 0, NULL, NULL, now())
   ON CONFLICT (id) DO UPDATE SET
     username         = EXCLUDED.username,
     display_name     = EXCLUDED.display_name,
     avatar_url       = EXCLUDED.avatar_url,
-    is_banned        = EXCLUDED.is_banned;
+    is_banned        = EXCLUDED.is_banned,
+    profile_completed_at = EXCLUDED.profile_completed_at;
 
   INSERT INTO public.user_blocks (blocker_id, blocked_id)
   VALUES
