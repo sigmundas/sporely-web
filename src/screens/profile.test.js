@@ -33,6 +33,25 @@ test('a friend whose profile is not public keeps a row and a Remove button', () 
   assert.match(html, /<div class="friend-email">[^<@]+<\/div>\s*<button class="friend-remove-btn" data-id="friend-hidden">/)
 })
 
+test('unnamed friends and blocks can be told apart, and a person gets one friend row', () => {
+  const idA = 'aaaaaaaa-0000-4000-8000-000000000001'
+  const idB = 'bbbbbbbb-0000-4000-8000-000000000002'
+  const labels = html => [...html.matchAll(/<div class="friend-email">([^<]*)<\/div>/g)].map(m => m[1])
+
+  // idA appears twice: crossed friend requests leave two accepted rows.
+  const friendLabels = labels(friendRowsHtmlForTests([idA, idB, idA], []))
+  assert.equal(friendLabels.length, 2)
+  assert.notEqual(friendLabels[0], friendLabels[1])
+  assert.match(friendLabels[0], /aaaaaaaa$/)
+  assert.match(friendLabels[1], /bbbbbbbb$/)
+
+  const blockLabels = [idA, idB].map(id => labels(blockedUserRowHtmlForTests({
+    blocked_id: id, username: null, display_name: null, avatar_url: null,
+  }))[0])
+  assert.notEqual(blockLabels[0], blockLabels[1])
+  assert.match(blockLabels[0], /aaaaaaaa$/)
+})
+
 test('friend rows escape profile names and ids', () => {
   const html = friendRowsHtmlForTests(
     ['id"><b>'],
