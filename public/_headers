@@ -44,6 +44,12 @@
   Content-Type: application/json
   Cache-Control: no-cache
 
+# RFC 9116 security contact. Without this file the SPA fallback answers the
+# path with the app shell and status 200.
+/.well-known/security.txt
+  Content-Type: text/plain; charset=utf-8
+  Cache-Control: no-cache
+
 /icon-192-v3.png
   Cache-Control: no-cache
 
