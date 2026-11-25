@@ -23,3 +23,11 @@ test('security.txt is published with the fields RFC 9116 requires', () => {
   const headers = readFileSync(new URL('../public/_headers', import.meta.url), 'utf8')
   assert.match(headers, /^\/\.well-known\/security\.txt\n  Content-Type: text\/plain; charset=utf-8$/m)
 })
+
+test('every app response carries a one-year HSTS policy', () => {
+  const headers = readFileSync(new URL('../public/_headers', import.meta.url), 'utf8')
+  const rootBlock = headers.split('\n\n')[0]
+
+  assert.match(rootBlock, /^\/\*$/m)
+  assert.match(rootBlock, /^  Strict-Transport-Security: max-age=31536000$/m)
+})
