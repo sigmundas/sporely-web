@@ -88,6 +88,31 @@ Deno.serve(async req => {
         return { ok: false, detail: (err as Error).message }
       }
     },
+    async sweepAccountMedia() {
+      try {
+        const response = await fetch(`${mediaUploadBaseUrl}/account/media-sweep`, {
+          method: 'POST',
+          headers: { Authorization: authHeader },
+        })
+        let body: any = null
+        try { body = JSON.parse(await response.text()) } catch { /* non-JSON error body */ }
+        if (response.ok && body?.ok === true) {
+          return {
+            ok: true,
+            status: response.status,
+            deleted: Number(body.deleted || 0),
+            done: body.done === true,
+          }
+        }
+        return {
+          ok: false,
+          status: response.status,
+          detail: body?.error || body?.message || response.statusText || 'unknown',
+        }
+      } catch (err) {
+        return { ok: false, detail: (err as Error).message }
+      }
+    },
   }
 
   try {

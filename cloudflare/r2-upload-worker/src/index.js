@@ -206,6 +206,10 @@ async function handleRequest(request, env, ctx) {
     return handleDelete(request, env, ctx, url)
   }
 
+  if (request.method === 'POST' && url.pathname === '/account/media-sweep') {
+    return handleAccountMediaSweep(request, env, ctx)
+  }
+
   // Stage 2 image-media delivery route: image-ID + variant based.
   if (request.method === 'GET' && url.pathname.startsWith('/m/')) {
     return handleMediaDelivery(request, env, ctx, url)
@@ -483,6 +487,12 @@ async function handleUpload(request, env, ctx, url) {
   const accountingStorageDelta = resultingLogicalBytes - existingLogicalBytes
   const storageDelta = Math.max(0, accountingStorageDelta)
   const rawProfile = await fetchStorageProfile(env, claims.sub)
+  // A signed-in caller without a profile row is an account being deleted
+  // (or already deleted while its token is still valid). Its uploads would
+  // land after the deletion snapshot and stay in R2 for good.
+  if (hasSupabaseServiceRole(env) && !rawProfile) {
+    throw httpError(403, 'profile_missing', 'This account has no profile; uploads are refused')
+  }
   if (rawProfile?.is_banned === true) {
     throw httpError(403, 'user_banned', 'User is banned from uploading media')
   }
@@ -690,6 +700,14 @@ async function handleUpload(request, env, ctx, url) {
   } catch (error) {
     await rollbackWrittenBytesOnly()
     throw error
+  }
+  // The tally update matched no profile row: the profile was deleted after
+  // the check above (account deletion running concurrently). Do not leave
+  // the object behind the deletion sweep.
+  if (trackedProfile === null && hasSupabaseServiceRole(env)
+      && (accountingStorageDelta || imageDelta)) {
+    await rollbackWrittenBytesOnly()
+    throw httpError(403, 'profile_missing', 'This account has no profile; uploads are refused')
   }
 
   if (canonicalBucket === 'private'
@@ -946,6 +964,93 @@ async function handleDelete(request, env, ctx, url) {
     env,
     origin,
   )
+}
+
+// R2 list pages (of up to 1000 keys each) one sweep request may delete. The
+// caller repeats the request until it reports `done`, which keeps each
+// request well inside the Worker subrequest and CPU limits.
+export const ACCOUNT_SWEEP_MAX_PAGES = 5
+const ACCOUNT_SWEEP_PAGE_SIZE = 1000
+
+/**
+ * POST /account/media-sweep — the last media step of account deletion.
+ *
+ * Deletes every object under the caller's own `<sub>/` prefix in every
+ * configured bucket, including objects no database row points at (legacy
+ * uploads without an image row, uploads that landed after the deletion
+ * snapshot, abandoned `.pending-` temp keys).
+ *
+ * Only an account whose profile row is already gone may sweep: the
+ * delete-account function deletes the profile first, and uploads from an
+ * account without a profile are refused, so nothing can land behind the
+ * sweep. A live account can never wipe its own media through this route.
+ * No storage accounting is done; the profile that held it no longer exists.
+ */
+async function handleAccountMediaSweep(request, env, ctx) {
+  const origin = resolveAllowedOrigin(request, env)
+  if (request.headers.get('Origin') && !origin) {
+    throw httpError(403, 'origin_not_allowed', 'Origin is not allowed')
+  }
+
+  const token = parseBearerToken(request.headers.get('Authorization'))
+  const claims = await verifySupabaseJwt(token, env, ctx)
+  const sub = String(claims?.sub || '')
+  if (!/^[0-9A-Za-z][0-9A-Za-z-]{7,}$/.test(sub)) {
+    throw httpError(403, 'key_not_allowed', 'Token has no usable user id')
+  }
+  if (!hasSupabaseServiceRole(env)) {
+    throw httpError(503, 'sweep_unavailable', 'Media sweep needs the profile lookup')
+  }
+  if (await fetchStorageProfile(env, sub)) {
+    throw httpError(409, 'profile_exists', 'Media sweep runs only after the profile is deleted')
+  }
+
+  const bindings = configuredBucketRoles(env)
+  if (!bindings.length) {
+    throw httpError(500, 'missing_bucket', 'No R2 bucket bindings are configured')
+  }
+
+  const prefix = `${sub}/`
+  let pagesLeft = ACCOUNT_SWEEP_MAX_PAGES
+  let deleted = 0
+  let done = true
+  for (const { role, bucket } of bindings) {
+    let truncated = true
+    while (truncated) {
+      if (pagesLeft <= 0) {
+        done = false
+        break
+      }
+      pagesLeft -= 1
+      let listing
+      try {
+        listing = await bucket.list({ prefix, limit: ACCOUNT_SWEEP_PAGE_SIZE })
+      } catch (error) {
+        throw httpError(502, 'media_sweep_failed', `Could not list ${role} storage`, {
+          role, phase: 'list', error: safeOperationError(error),
+        })
+      }
+      // List again from the start after each delete instead of following
+      // the cursor: deleted keys drop out, so the next page is what is left.
+      const keys = (listing?.objects || [])
+        .map(object => String(object?.key || ''))
+        .filter(key => key.startsWith(prefix))
+      if (keys.length) {
+        try {
+          await bucket.delete(keys)
+        } catch (error) {
+          throw httpError(502, 'media_sweep_failed', `Could not delete from ${role} storage`, {
+            role, phase: 'delete', error: safeOperationError(error),
+          })
+        }
+        deleted += keys.length
+      }
+      truncated = !!listing?.truncated && keys.length > 0
+    }
+    if (!done) break
+  }
+
+  return jsonResponse({ ok: true, deleted, done }, 200, request, env, origin)
 }
 
 /**

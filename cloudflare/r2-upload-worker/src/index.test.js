@@ -2899,3 +2899,164 @@ test('legacy uploads store the Worker Cache-Control, not the client value', asyn
     }])
   } finally { restoreFetch() }
 })
+
+// ── Account deletion: profileless uploads and the prefix sweep ────────
+
+test('uploads from an account without a profile row are refused before any write', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock(null)
+  let puts = 0
+  try {
+    const response = await worker.fetch(
+      buildUploadRequest({
+        token, bodyBytes: 200, uploadMode: 'full', uploadVariant: 'full',
+        cloudPlan: 'free', qualityProfile: 'standard', sourceWidth: 100,
+        sourceHeight: 100, storedWidth: 100, storedHeight: 100,
+      }),
+      legacyUploadEnv(jwtSecret, { head: async () => null, put: async () => { puts += 1; return {} } }),
+      {},
+    )
+    const payload = await response.json()
+    assert.equal(response.status, 403)
+    assert.equal(payload.error, 'profile_missing')
+    assert.equal(puts, 0)
+  } finally { restoreFetch() }
+})
+
+test('an upload whose profile is deleted mid-request is rolled back', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async input => {
+    const url = typeof input === 'string' ? input : String(input?.url || '')
+    if (url.includes('/rest/v1/profiles?')) {
+      return new Response(JSON.stringify([PRO_PROFILE]), { status: 200 })
+    }
+    if (url.includes('/rest/v1/rpc/apply_profile_storage_delta')) {
+      // The profile row was deleted between the check and the tally.
+      return new Response('[]', { status: 200 })
+    }
+    throw new Error(`Unexpected fetch: ${url}`)
+  }
+  const bucket = makeMockBucketStage2()
+  try {
+    const response = await worker.fetch(
+      buildUploadRequest({
+        token, bodyBytes: 200, uploadMode: 'full', uploadVariant: 'full',
+        cloudPlan: 'pro', qualityProfile: 'high', sourceWidth: 100,
+        sourceHeight: 100, storedWidth: 100, storedHeight: 100,
+      }),
+      legacyUploadEnv(jwtSecret, bucket),
+      {},
+    )
+    assert.equal(response.status, 403)
+    assert.equal((await response.json()).error, 'profile_missing')
+    assert.equal(bucket._has('user-123/obs-123/0_000000.webp'), false)
+  } finally { globalThis.fetch = originalFetch }
+})
+
+function makeListableBucket(keys = []) {
+  const objects = new Set(keys)
+  const events = []
+  return {
+    events,
+    async head(key) { return objects.has(key) ? { size: 1 } : null },
+    async list({ prefix = '', limit = 1000 } = {}) {
+      events.push({ op: 'list', prefix })
+      const matching = [...objects].filter(key => key.startsWith(prefix)).sort()
+      return {
+        objects: matching.slice(0, limit).map(key => ({ key })),
+        truncated: matching.length > limit,
+      }
+    },
+    async delete(keyOrKeys) {
+      const list = Array.isArray(keyOrKeys) ? keyOrKeys : [keyOrKeys]
+      events.push({ op: 'delete', keys: list })
+      for (const key of list) objects.delete(key)
+    },
+    _keys() { return [...objects].sort() },
+  }
+}
+
+function sweepRequest(token) {
+  return new Request('https://upload.sporely.no/account/media-sweep', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+function sweepEnv(jwtSecret, buckets) {
+  return {
+    ...TEST_ENV,
+    MEDIA_STORAGE_MODE: 'legacy',
+    SUPABASE_URL: 'https://example.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+    SUPABASE_JWT_SECRET: jwtSecret,
+    ...buckets,
+  }
+}
+
+test('media sweep deletes only the caller prefix in every bucket once the profile is gone', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock(null)
+  const legacy = makeListableBucket([
+    'user-123/obs/0_a.webp', 'user-123/obs/thumb_0_a.webp', 'user-123/obs/x.webp.pending-abc',
+    'user-1234/obs/other.webp', 'other-user/user-123/obs.webp',
+  ])
+  const priv = makeListableBucket(['user-123/obs/1_b.webp', 'someone-else/obs/1.webp'])
+  try {
+    const response = await worker.fetch(
+      sweepRequest(token),
+      sweepEnv(jwtSecret, { MEDIA_BUCKET: legacy, PRIVATE_MEDIA_BUCKET: priv }),
+      {},
+    )
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), { ok: true, deleted: 4, done: true })
+    assert.deepEqual(legacy._keys(), ['other-user/user-123/obs.webp', 'user-1234/obs/other.webp'])
+    assert.deepEqual(priv._keys(), ['someone-else/obs/1.webp'])
+    for (const event of [...legacy.events, ...priv.events].filter(e => e.op === 'list')) {
+      assert.equal(event.prefix, 'user-123/')
+    }
+  } finally { restoreFetch() }
+})
+
+test('media sweep is refused while the caller still has a profile', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock(PRO_PROFILE)
+  const legacy = makeListableBucket(['user-123/obs/0_a.webp'])
+  try {
+    const response = await worker.fetch(sweepRequest(token), sweepEnv(jwtSecret, { MEDIA_BUCKET: legacy }), {})
+    assert.equal(response.status, 409)
+    assert.equal((await response.json()).error, 'profile_exists')
+    assert.deepEqual(legacy._keys(), ['user-123/obs/0_a.webp'])
+    assert.deepEqual(legacy.events, [])
+  } finally { restoreFetch() }
+})
+
+test('media sweep is refused without a token or without the profile lookup', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const legacy = makeListableBucket(['user-123/obs/0_a.webp'])
+  const noToken = await worker.fetch(
+    new Request('https://upload.sporely.no/account/media-sweep', { method: 'POST' }),
+    sweepEnv(jwtSecret, { MEDIA_BUCKET: legacy }), {})
+  assert.equal(noToken.status, 401)
+  const env = sweepEnv(jwtSecret, { MEDIA_BUCKET: legacy })
+  delete env.SUPABASE_SERVICE_ROLE_KEY
+  const noServiceRole = await worker.fetch(sweepRequest(token), env, {})
+  assert.equal(noServiceRole.status, 503)
+  assert.deepEqual(legacy._keys(), ['user-123/obs/0_a.webp'])
+})
+
+test('media sweep stops at its page budget and reports not done', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock(null)
+  const keys = Array.from({ length: 5500 }, (_, i) => `user-123/obs/${String(i).padStart(5, '0')}.webp`)
+  const legacy = makeListableBucket(keys)
+  try {
+    const env = sweepEnv(jwtSecret, { MEDIA_BUCKET: legacy })
+    const first = await worker.fetch(sweepRequest(token), env, {})
+    assert.deepEqual(await first.json(), { ok: true, deleted: 5000, done: false })
+    const second = await worker.fetch(sweepRequest(token), env, {})
+    assert.deepEqual(await second.json(), { ok: true, deleted: 500, done: true })
+    assert.deepEqual(legacy._keys(), [])
+  } finally { restoreFetch() }
+})
