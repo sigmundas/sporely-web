@@ -3058,3 +3058,46 @@ test('media sweep stops at its page budget and reports not done', async () => {
     assert.deepEqual(legacy._keys(), [])
   } finally { restoreFetch() }
 })
+
+// ── Free-plan storage quota ───────────────────────────────────────────
+
+const FREE_QUOTA_BYTES = 2 * 1024 * 1024 * 1024
+
+test('wrangler.toml sets the 2 GiB free-plan storage quota', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const toml = await readFile(new URL('../wrangler.toml', import.meta.url), 'utf8')
+  assert.match(toml, new RegExp(`^FREE_STORAGE_QUOTA_BYTES = "${FREE_QUOTA_BYTES}"$`, 'm'))
+})
+
+for (const [label, usedBytes, expectedStatus] of [
+  ['under', FREE_QUOTA_BYTES - 10_000, 201],
+  ['over', FREE_QUOTA_BYTES - 100, 413],
+]) {
+  test(`a free account ${label} the configured quota gets ${expectedStatus}`, async () => {
+    const { jwtSecret, token } = createWorkerAuthToken()
+    const restoreFetch = installProfileFetchMock({
+      is_pro: false, cloud_plan: 'free', storage_quota_bytes: null,
+      total_storage_bytes: usedBytes, storage_used_bytes: usedBytes, image_count: 1, is_banned: false,
+    })
+    let puts = 0
+    try {
+      const response = await worker.fetch(
+        buildUploadRequest({
+          token, bodyBytes: 200, uploadMode: 'reduced', uploadVariant: 'full',
+          cloudPlan: 'free', qualityProfile: 'standard', sourceWidth: 100,
+          sourceHeight: 100, storedWidth: 100, storedHeight: 100,
+        }),
+        {
+          ...legacyUploadEnv(jwtSecret, { head: async () => null, put: async () => { puts += 1; return {} } }),
+          FREE_STORAGE_QUOTA_BYTES: String(FREE_QUOTA_BYTES),
+        },
+        {},
+      )
+      assert.equal(response.status, expectedStatus)
+      if (expectedStatus === 413) {
+        assert.equal((await response.json()).error, 'storage_quota_exceeded')
+        assert.equal(puts, 0)
+      }
+    } finally { restoreFetch() }
+  })
+}

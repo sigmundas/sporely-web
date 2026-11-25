@@ -1155,7 +1155,13 @@ function assertStorageQuotaAllowsUpload(profile, storageDelta, env) {
 
   if (profile.cloudPlan === 'pro' || profile.hasProAccess === true) return
 
-  const quota = parseNonNegativeInt(profile.storageQuotaBytes, parseNonNegativeInt(env.FREE_STORAGE_QUOTA_BYTES, DEFAULT_FREE_STORAGE_QUOTA_BYTES))
+  // A per-profile quota wins when set. A null one falls back to the free-plan
+  // quota; Number(null) is 0, so it must not go through parseNonNegativeInt,
+  // which would read it as "unlimited" and ignore FREE_STORAGE_QUOTA_BYTES.
+  const freeQuota = parseNonNegativeInt(env.FREE_STORAGE_QUOTA_BYTES, DEFAULT_FREE_STORAGE_QUOTA_BYTES)
+  const quota = profile.storageQuotaBytes === null || profile.storageQuotaBytes === undefined
+    ? freeQuota
+    : parseNonNegativeInt(profile.storageQuotaBytes, freeQuota)
   if (!quota) return
 
   const used = parseNonNegativeInt(profile.storageUsedBytes, 0)
