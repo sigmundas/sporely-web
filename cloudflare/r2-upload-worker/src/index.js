@@ -518,6 +518,11 @@ async function handleUpload(request, env, ctx, url) {
   const resultingLogicalBytes = Math.max(bodyBytes, alternateLogicalBytes)
   const accountingStorageDelta = resultingLogicalBytes - existingLogicalBytes
   const storageDelta = Math.max(0, accountingStorageDelta)
+  // The profile lookup carries the ban, deletion and quota checks; without
+  // the service role all three would silently pass.
+  if (!hasSupabaseServiceRole(env)) {
+    throw httpError(503, 'upload_unavailable', 'Uploads need the profile lookup')
+  }
   const rawProfile = await fetchStorageProfile(env, claims.sub)
   // A signed-in caller without a profile row is an account being deleted
   // (or already deleted while its token is still valid). Its uploads would

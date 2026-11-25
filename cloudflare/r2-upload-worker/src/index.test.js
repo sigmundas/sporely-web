@@ -3285,3 +3285,22 @@ test('a failed promotion reverses the storage tally and keeps the previous bytes
     assert.equal(new TextDecoder().decode(await final.body), 'PRIOR')
   } finally { restore() }
 })
+
+test('uploads are refused when the worker has no service role for the profile lookup', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  let puts = 0
+  const env = legacyUploadEnv(jwtSecret, { head: async () => null, put: async () => { puts += 1; return {} } })
+  delete env.SUPABASE_SERVICE_ROLE_KEY
+  const response = await worker.fetch(
+    buildUploadRequest({
+      token, bodyBytes: 200, uploadMode: 'full', uploadVariant: 'full',
+      cloudPlan: 'free', qualityProfile: 'standard', sourceWidth: 100,
+      sourceHeight: 100, storedWidth: 100, storedHeight: 100,
+    }),
+    env,
+    {},
+  )
+  assert.equal(response.status, 503)
+  assert.equal((await response.json()).error, 'upload_unavailable')
+  assert.equal(puts, 0)
+})
