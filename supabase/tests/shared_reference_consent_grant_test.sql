@@ -305,7 +305,15 @@ BEGIN
   IF pg_temp.grant_as(owner_a,s_multi,t_species)->>'status' <> 'account_unavailable' THEN
     RAISE EXCEPTION 'a banned account could grant';
   END IF;
+  -- Unban as an admin would: without the banned user's JWT claims, which
+  -- 20261125233000 refuses for a profile update. Claims are restored after.
+  PERFORM set_config('test.saved_claims', coalesce(current_setting('request.jwt.claims', true), ''), true),
+          set_config('test.saved_sub', coalesce(current_setting('request.jwt.claim.sub', true), ''), true),
+          set_config('request.jwt.claims', '', true),
+          set_config('request.jwt.claim.sub', '', true);
   UPDATE public.profiles SET is_banned=false WHERE id=owner_a;
+  PERFORM set_config('request.jwt.claims', current_setting('test.saved_claims'), true),
+          set_config('request.jwt.claim.sub', current_setting('test.saved_sub'), true);
   INSERT INTO private.reference_account_deletions(user_id) VALUES (owner_b);
   IF pg_temp.grant_as(owner_b,s_b,t_species)->>'status' <> 'account_unavailable' THEN
     RAISE EXCEPTION 'a deleting account could grant';
