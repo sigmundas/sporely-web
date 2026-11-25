@@ -2791,15 +2791,13 @@ const PRO_PROFILE = {
   total_storage_bytes: 0, storage_used_bytes: 0, image_count: 0, is_banned: false,
 }
 
-test('normalizeUploadContentType refuses SVG, XML and malformed types', () => {
+test('normalizeUploadContentType refuses missing, octet-stream, SVG, XML and malformed types', () => {
   assert.equal(normalizeUploadContentType('image/webp'), 'image/webp')
   assert.equal(normalizeUploadContentType('IMAGE/JPEG; charset=binary'), 'image/jpeg')
   assert.equal(normalizeUploadContentType('image/tiff'), 'image/tiff')
   assert.equal(normalizeUploadContentType('image/heic'), 'image/heic')
-  assert.equal(normalizeUploadContentType(''), 'application/octet-stream')
-  assert.equal(normalizeUploadContentType(null), 'application/octet-stream')
-  assert.equal(normalizeUploadContentType('application/octet-stream'), 'application/octet-stream')
   for (const refused of [
+    '', null, undefined, 'application/octet-stream', 'Application/Octet-Stream; x=1',
     'image/svg+xml', 'image/SVG+XML; charset=utf-8', 'image/svg', 'image/x-svg',
     'image/vnd.xml', 'text/html', 'image/png, text/html', 'image/', 'image',
     'application/xml', 'image/png text/html',
@@ -2813,7 +2811,7 @@ test('uploads with an SVG content type are refused before any write', async () =
   const restoreFetch = installProfileFetchMock(PRO_PROFILE)
   let puts = 0
   try {
-    for (const contentType of ['image/svg+xml', 'image/svg+xml; charset=utf-8', 'text/html']) {
+    for (const contentType of ['image/svg+xml', 'image/svg+xml; charset=utf-8', 'text/html', 'application/octet-stream']) {
       const response = await worker.fetch(
         buildUploadRequest({
           token, bodyBytes: 200, uploadMode: 'full', uploadVariant: 'full',

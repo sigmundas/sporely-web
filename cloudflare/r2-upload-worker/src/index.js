@@ -1763,9 +1763,11 @@ export function applyStoredMediaSafetyHeaders(headers) {
  * deny-list of active types rather than a strict raster allow-list.
  */
 export function normalizeUploadContentType(raw) {
+  // Only raster image types. A missing type and application/octet-stream
+  // are refused: no Sporely client sends either, and accepting them made
+  // the public media host usable for arbitrary files.
   const value = String(raw || '').split(';', 1)[0].trim().toLowerCase()
-  if (!value) return 'application/octet-stream'
-  if (value === 'application/octet-stream') return value
+  if (!value) return null
   if (!/^image\/[a-z0-9][a-z0-9.+-]*$/.test(value)) return null
   if (/svg|xml/.test(value)) return null
   return value
