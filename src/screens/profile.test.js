@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { blockedUserRowHtmlForTests, forceCloseProfileOverlay, openProfileOverlay } from './profile.js'
+import { blockedUserRowHtmlForTests, forceCloseProfileOverlay, friendRowsHtmlForTests, openProfileOverlay } from './profile.js'
 import * as profileScreen from './profile.js'
 import { AUTH_STATE, _resetAuthStateForTests, setAuthState } from '../auth-state.js'
 import { showProfileOverlay } from '../profile-overlay.js'
@@ -18,6 +18,30 @@ test('blocked-user fallback avatar escapes a display-name-derived initial', () =
   assert.match(html, /<div class="friend-avatar">&lt;<\/div>/)
   assert.doesNotMatch(html, /<div class="friend-avatar"><script>/)
   assert.match(html, /<div class="friend-email">&lt;script&gt;alert\(1\)&lt;\/script&gt;<\/div>/)
+})
+
+test('a friend whose profile is not public keeps a row and a Remove button', () => {
+  // public_profiles omits banned, blocked and unfinished accounts. The
+  // friendship still exists, so the user must be able to see and remove it.
+  const html = friendRowsHtmlForTests(
+    ['friend-visible', 'friend-hidden'],
+    [{ id: 'friend-visible', username: 'kari', display_name: 'Kari' }],
+  )
+
+  assert.equal((html.match(/class="friend-row"/g) || []).length, 2)
+  assert.match(html, /<div class="friend-email">@kari<\/div>\s*<button class="friend-remove-btn" data-id="friend-visible">/)
+  assert.match(html, /<div class="friend-email">[^<@]+<\/div>\s*<button class="friend-remove-btn" data-id="friend-hidden">/)
+})
+
+test('friend rows escape profile names and ids', () => {
+  const html = friendRowsHtmlForTests(
+    ['id"><b>'],
+    [{ id: 'id"><b>', username: null, display_name: '<script>alert(1)</script>' }],
+  )
+
+  assert.doesNotMatch(html, /<script>|<b>/)
+  assert.match(html, /<div class="friend-avatar">&lt;<\/div>/)
+  assert.match(html, /data-id="id&quot;&gt;&lt;b&gt;"/)
 })
 
 test('force-closing an already hidden profile cannot hide the next setup overlay', () => {
