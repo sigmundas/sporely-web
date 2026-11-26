@@ -846,8 +846,8 @@ failures as on main), §K fixture (42 cases), REST and concurrency (46 races) pa
   private bucket, the rerun no longer sends that key to the Worker, and the prefix passes cannot
   see the private bucket. Both faults are needed; the configuration check before the sign-out is
   the place to catch the first.
-- 9 (late Worker PUT after the empty check): the R2 side is now covered by main's Worker work
-  (merged 2026-11-26, see below), not by this branch.
+- 9 (late Worker PUT after the empty check): mostly covered by main's Worker work (merged
+  2026-11-26, see below), not by this branch; two gaps remain (Stage 0b).
   - Original plan (Stage 0b): the Worker checks the account-deletion marker before the write and
     again right after the R2 put, and deletes what it just wrote if the marker exists by then.
   - What main has instead: the Worker refuses uploads from an account without a profile row, looks
@@ -855,13 +855,22 @@ failures as on main), §K fixture (42 cases), REST and concurrency (46 races) pa
     `POST /account/media-sweep` deletes everything under `<uid>/` once the profile is deleted.
     delete-account calls that sweep after `delete_profile` (stage `sweep_r2_prefix`) and checks the
     route first (`sweep_preflight`). A write that finished before the post-write lookup is seen by
-    the sweep; a later one is removed by the Worker itself. The account-deletion marker check is
-    therefore no longer needed for R2.
-  - Still open, optional: an admin-ops orphan-prefix sweep for abandoned runs (profile deleted,
+    the sweep; a later one is removed by the Worker itself.
+  - Remaining gaps (Codex review 2026-11-26, confirmed in `handleUpload`): the post-write lookup
+    fails open. If the profile lookup errors (`profile_fetch_failed`), the Worker returns 500 and
+    keeps the write; if the cleanup delete fails, it only logs. In both cases a write that lands
+    after the final sweep survives the account. Stage 0b: decide whether a failed lookup removes
+    the write (it would also drop a live user's overwrite on a transient error), and add the
+    admin-ops orphan-prefix sweep, which also catches these and abandoned runs (profile deleted,
     sweep never completed, the user never retries).
-- Rollout rule: delete-account with this branch's stages needs main's Worker (sweep route and
-  profile fence) live. `sweep_preflight` enforces this at run time: without the route it stops
-  before anything is deleted.
+- Rollout rule: delete-account with this branch's stages needs main's Worker at or after 92eb862
+  (post-write profile fence) and f7f3a4d (refuse uploads without the profile lookup) live. Check
+  the deployed Worker version before deploying delete-account. `sweep_preflight` only proves the
+  sweep route exists (8b68b7b and later), not that the fence is there.
+- Known limit (Codex review 2026-11-26, low): `delete_r2_prefix` deletes objects before
+  `delete_r2_media` sends the per-key Worker DELETEs, so those find nothing and debit 0. If a later
+  stage fails, the fenced account stays charged for media it no longer has (safe direction;
+  `recalculate_profile_storage_usage` repairs it; the profile is deleted at the end anyway).
 
 ## Second merge of main (2026-11-26); still not deployed
 
