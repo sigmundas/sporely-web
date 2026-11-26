@@ -1506,16 +1506,25 @@ export async function runRetiredKeySweep(
 // post-write profile check fails open on a lookup or delete error), or a
 // deletion run that got past delete_profile and was never retried.
 // public.media_prefix_owner_status (20261126130000) decides which prefixes
-// may be swept; nothing else is deleted. Per prefix: list the objects, check
-// the owner again, then delete exactly the listed objects, so an object
-// written after the listing is never touched and an owner that changed in
-// between stops the delete. Dry run by default; a real run also needs the
-// tombstone purge switch. No quota accounting: the profile is gone.
+// may be swept; nothing else is deleted. A prefix that another owner's row
+// still references (media_prefix_foreign_references) is left for review.
+// Per prefix: list the objects, check the owner again, then delete exactly
+// the listed objects, so an object written after the listing is never
+// touched and an owner that changed in between stops the delete; list again
+// afterwards and report 'incomplete' if anything is left.
+//
+// Dry run by default. A real run also needs the tombstone purge switch and
+// `expected_sweepable` equal to the number of sweepable prefixes (take it
+// from a dry run), and is refused when no prefix belongs to a live account:
+// both catch a database and an R2 bucket of different environments (local
+// functions with production R2 keys would classify every production prefix
+// as sweepable). No quota accounting: the profile is gone.
 
 const ORPHAN_SWEEP_PREFIX_LIMIT_DEFAULT = 20
 const ORPHAN_SWEEP_PREFIX_LIMIT_MAX = 200
 const ORPHAN_SWEEP_OBJECT_BUDGET = 50_000
 const OWNER_STATUS_BATCH = 500
+const FOREIGN_REFERENCE_BATCH = 1000
 
 export type OrphanSweepObject = { bucket: string; key: string; size: number }
 
@@ -1543,6 +1552,11 @@ async function sweepOrphanMediaPrefixes(context: AdminActionContext): Promise<Ad
   if (!dryRun && !isTombstonePurgeEnabled(context.env)) {
     return actionFailureResponse(409, TOMBSTONE_PURGE_DISABLED, 'Tombstone purge (and the orphan prefix sweep) is disabled on the server; a dry run is still allowed')
   }
+  const expectedRaw = context.requestBody?.expected_sweepable
+  const expectedSweepable = Number.isInteger(expectedRaw) && Number(expectedRaw) >= 0 ? Number(expectedRaw) : null
+  if (!dryRun && expectedSweepable === null) {
+    return actionFailureResponse(400, 'expected_sweepable_required', 'A real run needs expected_sweepable: the sweepable count from a dry run')
+  }
   const limit = Math.min(ORPHAN_SWEEP_PREFIX_LIMIT_MAX, normalizePositiveInteger(context.requestBody?.limit, ORPHAN_SWEEP_PREFIX_LIMIT_DEFAULT))
 
   return await withAdminActionLog({
@@ -1553,8 +1567,8 @@ async function sweepOrphanMediaPrefixes(context: AdminActionContext): Promise<Ad
     targetId: `limit:${limit}:dry_run:${dryRun}`,
     reason: reason.value,
     requestPayload: context.requestBody,
-    beforeSnapshot: { limit, dry_run: dryRun },
-    run: async () => runOrphanPrefixSweep(context, { limit, dryRun }),
+    beforeSnapshot: { limit, dry_run: dryRun, expected_sweepable: expectedSweepable },
+    run: async () => runOrphanPrefixSweep(context, { limit, dryRun, expectedSweepable }),
   })
 }
 
@@ -1574,6 +1588,23 @@ async function loadOwnerStatuses(adminClient: any, userIds: string[]): Promise<M
   return statuses
 }
 
+async function countForeignReferences(adminClient: any, userId: string, keys: string[]): Promise<number> {
+  let total = 0
+  for (let i = 0; i < keys.length; i += FOREIGN_REFERENCE_BATCH) {
+    const { data, error } = await callRpcWithRetry(adminClient, 'media_prefix_foreign_references', {
+      p_user_id: userId,
+      p_keys: keys.slice(i, i + FOREIGN_REFERENCE_BATCH),
+    })
+    if (error) {
+      throw actionError(500, 'foreign_reference_check_failed', `media_prefix_foreign_references failed: ${error.message || error.code}`)
+    }
+    const count = Number(data)
+    if (!Number.isFinite(count)) throw actionError(500, 'foreign_reference_check_failed', 'media_prefix_foreign_references returned no count')
+    total += count
+  }
+  return total
+}
+
 function ownerState(status: OwnerStatus | undefined): 'live' | 'sweepable' | 'needs_review' {
   if (!status) return 'needs_review' // not classified: never deleted
   if (status.has_profile) return 'live'
@@ -1582,7 +1613,7 @@ function ownerState(status: OwnerStatus | undefined): 'live' | 'sweepable' | 'ne
 
 export async function runOrphanPrefixSweep(
   context: Pick<AdminActionContext, 'adminClient' | 'env'>,
-  options: { limit: number; dryRun: boolean },
+  options: { limit: number; dryRun: boolean; expectedSweepable?: number | null },
   clientFactory: (env: Record<string, string | undefined>) => OrphanSweepR2Client = createOrphanSweepR2Client,
 ) {
   const client = clientFactory(context.env)
@@ -1592,10 +1623,12 @@ export async function runOrphanPrefixSweep(
     live: 0,
     needs_review: 0,
     sweepable: 0,
+    foreign_referenced: 0,
     would_delete: 0,
     swept: 0,
+    partial: 0,
+    incomplete: 0,
     owner_changed: 0,
-    deferred: 0,
     errors: 0,
     objects_deleted: 0,
     bytes_deleted: 0,
@@ -1628,20 +1661,31 @@ export async function runOrphanPrefixSweep(
   }
   counts.sweepable = candidates.length
 
+  if (!options.dryRun) {
+    if (canonical.length > 0 && counts.live === 0) {
+      throw actionError(409, 'no_live_prefixes', 'No media prefix belongs to a live account; the database and the R2 buckets may be of different environments', { counts })
+    }
+    if (options.expectedSweepable !== counts.sweepable) {
+      throw actionError(409, 'sweepable_count_mismatch', `expected_sweepable is ${options.expectedSweepable ?? 'missing'}, the sweep found ${counts.sweepable}; run a dry run first`, { counts })
+    }
+  }
+
   let objectBudget = ORPHAN_SWEEP_OBJECT_BUDGET
   for (const userId of candidates.slice(0, options.limit)) {
+    if (!options.dryRun && objectBudget <= 0) break
     const prefix = `${userId}/`
     try {
-      const objects = (await client.listObjects(prefix)).filter(object => object.key.startsWith(prefix))
-      const bytes = objects.reduce((sum, object) => sum + Math.max(0, Number(object.size) || 0), 0)
-      if (options.dryRun) {
-        counts.would_delete += 1
-        rows.push({ user_id: userId, status: 'would_delete', objects: objects.length, bytes, buckets: [...new Set(objects.map(o => o.bucket))] })
+      const listed = (await client.listObjects(prefix)).filter(object => object.key.startsWith(prefix))
+      const foreign = await countForeignReferences(context.adminClient, userId, [...new Set(listed.map(object => object.key))])
+      if (foreign > 0) {
+        counts.foreign_referenced += 1
+        rows.push({ user_id: userId, status: 'needs_review', foreign_references: foreign, objects: listed.length })
         continue
       }
-      if (objects.length > objectBudget) {
-        counts.deferred += 1
-        rows.push({ user_id: userId, status: 'deferred', objects: objects.length, bytes })
+      const bytesOf = (list: OrphanSweepObject[]) => list.reduce((sum, object) => sum + Math.max(0, Number(object.size) || 0), 0)
+      if (options.dryRun) {
+        counts.would_delete += 1
+        rows.push({ user_id: userId, status: 'would_delete', objects: listed.length, bytes: bytesOf(listed), buckets: [...new Set(listed.map(o => o.bucket))] })
         continue
       }
       // Re-check after listing: only objects listed while the account was
@@ -1652,12 +1696,22 @@ export async function runOrphanPrefixSweep(
         rows.push({ user_id: userId, status: 'owner_changed', owner: recheck })
         continue
       }
-      await client.deleteObjects(objects)
-      objectBudget -= objects.length
-      counts.swept += 1
-      counts.objects_deleted += objects.length
-      counts.bytes_deleted += bytes
-      rows.push({ user_id: userId, status: 'swept', objects: objects.length, bytes })
+      // A prefix over the remaining budget is deleted in part; the next run
+      // continues it. The budget is charged before the delete, so a failed
+      // delete still counts against it.
+      const batch = listed.slice(0, objectBudget)
+      objectBudget -= batch.length
+      await client.deleteObjects(batch)
+      counts.objects_deleted += batch.length
+      counts.bytes_deleted += bytesOf(batch)
+      const left = (await client.listObjects(prefix)).filter(object => object.key.startsWith(prefix)).length
+      let status = 'swept'
+      if (batch.length < listed.length) status = 'partial'
+      else if (left > 0) status = 'incomplete'
+      if (status === 'swept') counts.swept += 1
+      else if (status === 'partial') counts.partial += 1
+      else counts.incomplete += 1
+      rows.push({ user_id: userId, status, objects: batch.length, bytes: bytesOf(batch), objects_left: left })
     } catch (error) {
       const failure = normalizeActionFailure(error)
       counts.errors += 1
@@ -1665,7 +1719,12 @@ export async function runOrphanPrefixSweep(
     }
   }
 
-  return { dry_run: options.dryRun, buckets: client.buckets, counts, rows }
+  // complete: every sweepable prefix was handled in this run and nothing is
+  // left behind or failed. Otherwise run the sweep again.
+  const complete = !options.dryRun
+    && counts.errors === 0 && counts.partial === 0 && counts.incomplete === 0
+    && counts.swept + counts.owner_changed + counts.foreign_referenced >= counts.sweepable
+  return { dry_run: options.dryRun, complete, buckets: client.buckets, counts, rows }
 }
 
 // S3-compatible listing client for the orphan sweep. Unlike createR2Client it

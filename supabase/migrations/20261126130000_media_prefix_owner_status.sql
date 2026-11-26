@@ -13,7 +13,10 @@
 -- A prefix whose account has a profile is live. One with an auth user but no
 -- profile and no marker is not swept: the sweep reports it for review.
 -- The rule lives here only; admin-ops acts on `sweepable`.
+-- media_prefix_foreign_references (below) reports other owners' rows that
+-- still point into such a prefix; admin-ops then leaves it for review.
 --
+-- Needs 20261126120000 (private.media_key_root, media_key_references).
 -- Service role only. Read-only.
 
 BEGIN;
@@ -59,6 +62,49 @@ COMMENT ON FUNCTION public.media_prefix_owner_status(uuid[]) IS
   'admin-ops orphan prefix sweep: per user id, whether a profile, an auth user and the '
   'account-deletion marker exist, and whether the <user_id>/ media prefix may be swept '
   '(no profile, and no auth user or the deletion marker set). Service role only.';
+
+-- Rows of OTHER owners that still reference the key families of p_keys
+-- (through private.media_key_references, 20261126120000, on the key-root
+-- expression indexes). The media-key guard refuses new cross-owner keys, but
+-- a legacy row or a data restore can still point into a deleted account's
+-- prefix; the sweep then leaves that prefix for review instead of deleting
+-- bytes a live user shows. Rows of p_user_id itself do not count: they are
+-- the deleted account's own leftovers.
+CREATE FUNCTION public.media_prefix_foreign_references(p_user_id uuid, p_keys text[])
+RETURNS bigint
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_roots text[];
+BEGIN
+  IF p_user_id IS NULL THEN
+    RAISE EXCEPTION 'p_user_id is required' USING ERRCODE = '22023';
+  END IF;
+  IF coalesce(pg_catalog.cardinality(p_keys), 0) > 1000 THEN
+    RAISE EXCEPTION 'media_prefix_foreign_references takes at most 1000 keys'
+      USING ERRCODE = '22023';
+  END IF;
+  SELECT pg_catalog.array_agg(DISTINCT private.media_key_root(k))
+    INTO v_roots
+    FROM pg_catalog.unnest(p_keys) AS k
+   WHERE private.media_key_root(k) IS NOT NULL;
+  IF v_roots IS NULL THEN
+    RETURN 0;
+  END IF;
+  RETURN (SELECT pg_catalog.count(*) FROM private.media_key_references(v_roots) r
+           WHERE r.owner_id IS DISTINCT FROM p_user_id);
+END
+$$;
+
+REVOKE ALL ON FUNCTION public.media_prefix_foreign_references(uuid, text[]) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.media_prefix_foreign_references(uuid, text[]) TO service_role;
+
+COMMENT ON FUNCTION public.media_prefix_foreign_references(uuid, text[]) IS
+  'admin-ops orphan prefix sweep: number of rows of owners other than p_user_id that '
+  'reference the key families of p_keys (at most 1000 keys). Service role only.';
 
 NOTIFY pgrst, 'reload schema';
 
