@@ -8,10 +8,29 @@ Probe SQL:
 - `supabase/batch-spore-preview-compensation-check.sql` (step 4, only if a
   compensation is needed).
 
-**Only a person runs this.** A person with explicit owner authorization
-performs every step and records the evidence. No agent runs any of it or
-connects to production. An agent may see only the aggregate results this
-runbook marks as recordable. Nothing here is deployed automatically.
+**Who may run what (`AGENTS.md`, "Production access — read-only by
+default").**
+- **Read-only steps:** an agent may run these without separate approval.
+  They are the read-only probes, each inside `BEGIN TRANSACTION READ ONLY` …
+  `ROLLBACK`:
+  - step 0's checks;
+  - 3a;
+  - 5 (`batch-spore-preview-stats-probe.sql`);
+  - 4's compensation *check*.
+- **Writes need explicit owner approval for that specific operation, in the
+  current conversation.** This covers:
+  - the migration push (step 2);
+  - any compensation;
+  - any role, grant or configuration change;
+  - anything that resets statistics.
+
+  A plan or task assignment alone is not approval.
+- **Everyone:** whoever runs a step records the evidence and keeps to the
+  data-handling rules below. Only the aggregate results this runbook marks as
+  recordable may be kept. Nothing here is deployed automatically.
+
+Historical records below that say "no agent connected to production" describe
+the 2026-10-12 to 2026-10-14 runs, made under the earlier person-only rule.
 
 Status: **executed 2026-10-12; re-verified 2026-10-13 (3a) and 2026-10-14
 (3b).** See "Production
@@ -496,6 +515,28 @@ any form, at any point in this runbook or the landing comparison.
 - **Expected for the batch function before the switch:** only the few step 3b
   calls, as `anon`. Statements from step 3a are excluded by their
   `/* bsp_probe */` marker.
+
+### Capture through the Supabase CLI (agent runs)
+
+`supabase db query --linked -o json -f <file>` uses the CLI's stored login,
+so no connection string is handled. It returns only the **last** result set,
+so the epoch row is missing from its output.
+
+**Bracket each snapshot:**
+1. Run the probe's epoch `SELECT`, copied verbatim inside the same read-only
+   transaction settings.
+2. Run the unchanged probe file.
+3. Run the epoch `SELECT` again.
+
+The snapshot is valid only if `stats_reset` and `dealloc` agree on both
+sides. Save all three outputs and their exit codes.
+
+Each call adds statement entries. When `entries_now` is near
+`pg_stat_statements.max`, a few calls can trigger an eviction (`dealloc` +1).
+This happened at A0 on 2026-10-19 (see `sporely-landing`
+`docs/perf/raw/batch-preview-a0-2026-10-19/README.md`). So:
+- make no exploratory queries;
+- keep to one bracket per snapshot.
 
 ### Why a single snapshot is not a baseline
 
