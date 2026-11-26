@@ -1079,6 +1079,48 @@ BEGIN
   PERFORM pg_temp.eq((SELECT finalized_at IS NOT NULL FROM public.media_object_deletion_accounting WHERE user_id = b::uuid AND storage_key = v_live), true, 'zero-byte prepare keeps finalized');
 END $$;
 
+-- ---------------------------------------------------------------
+-- Banned users (20261125233000). trg_000_writer_not_banned runs before the
+-- media-key guard on every guarded table and refuses a banned caller's
+-- release (it rewrites key columns, so it is not a tombstone) with nothing
+-- changed and no registry record. A banned user can still tombstone the
+-- image, which the purge then erases.
+-- ---------------------------------------------------------------
+INSERT INTO auth.users (id, aud, role, email, raw_user_meta_data, created_at, updated_at) VALUES
+  ('00000000-0000-4000-8000-0000006b0a03', 'authenticated', 'authenticated', 'mkr-c@example.invalid', '{}', now(), now());
+INSERT INTO public.profiles (id, username, is_banned) VALUES ('00000000-0000-4000-8000-0000006b0a03', 'mkr_c', false);
+INSERT INTO fx VALUES ('C', '00000000-0000-4000-8000-0000006b0a03');
+
+DO $$
+DECLARE
+  a text := pg_temp.fx('C');
+  k text;
+  v_img bigint;
+  v_out text;
+BEGIN
+  PERFORM pg_temp.eq((
+    SELECT count(*) FROM pg_trigger g JOIN pg_trigger z ON z.tgrelid = g.tgrelid
+     WHERE g.tgname = 'trg_000_writer_not_banned' AND z.tgname = 'zzy_media_key_retirement_guard'
+       AND g.tgname < z.tgname), 5::bigint, 'ban check sorts before the media-key guard on all five tables');
+
+  k := a || '/ban/small_photo.webp';
+  PERFORM pg_temp.seed('relban', 'C', k);
+  v_img := pg_temp.fxi('relban.img');
+  UPDATE public.profiles SET is_banned = true WHERE id = a::uuid;
+
+  v_out := pg_temp.run('authenticated', a::uuid, format(
+    $q$SELECT public.release_observation_image_bytes(gen_random_uuid(), %s, %L, NULL, 'owner_sync')$q$, v_img, k));
+  PERFORM pg_temp.eq(v_out, 'ERR:42501:sporely_account_suspended', 'banned release refused');
+  PERFORM pg_temp.eq((SELECT storage_path FROM public.observation_images WHERE id = v_img), k, 'banned release changed nothing');
+  PERFORM pg_temp.eq((SELECT count(*) FROM private.media_key_retirements r WHERE r.user_id = a::uuid AND r.image_id = v_img),
+                     0::bigint, 'banned release wrote no record');
+
+  v_out := pg_temp.run('authenticated', a::uuid, format(
+    $q$UPDATE public.observation_images SET deleted_at = now() WHERE id = %s RETURNING id$q$, v_img));
+  PERFORM pg_temp.eq(v_out, 'ok:' || v_img, 'banned tombstone passes both triggers');
+
+END $$;
+
 SELECT pg_temp.eq((SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'observation_images_purge_retirement_id_idx'), 1::bigint, 'purge_retirement_id FK index');
 SELECT pg_temp.eq((SELECT string_agg(DISTINCT tgenabled::text, ',') FROM pg_trigger
                     WHERE tgname IN ('zzy_media_key_retirement_guard', 'media_key_retirements_immutable', 'media_key_retirements_no_truncate',
