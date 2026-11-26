@@ -1,15 +1,18 @@
 # Remaining findings from the 2026-11-25 security scan
 
-Status: written 2026-11-25 as a handoff. Package B is done: PR #74, merged
+Status: written 2026-11-25 as a handoff. Package C is done: PR #76, merged
+as `01a28bc`, deployed to production on 2026-11-26: the upload worker first
+(version `fc0bcc1a`; the obsolete-desktop brake checks passed and `/healthz`
+shows all three rate limiters bound), then `delete-account` (version 4).
+Package B is done: PR #74, merged
 as `7811c8d`, migration `20261125233000` applied to production on 2026-11-25
 through the deploy tree (post-verify passed; a read-only catalog check
 confirmed the guard on all 20 tables and the comments read policy). Package A
 is done: PR #72, merged as
 `26c3779`, migration `20261125230000` applied to production on 2026-11-25
 through the deploy tree (post-verify passed; a read-only catalog check
-confirmed the policies, grants, view options and trigger functions). Package
-C is implemented on `fix/upload-worker-hardening` (see "Outcome of C"), not
-yet merged or deployed. Nothing else is implemented. Update this line when a work package
+confirmed the policies, grants, view options and trigger functions). Nothing
+else is implemented. Update this line when a work package
 lands; move the file to `completed/` when the list is empty.
 
 Written for an agent that has not seen the session that produced it.
@@ -29,6 +32,7 @@ Shipped from that scan:
 | #70 | `5374aab` | Migration `20261125210000`: an unfinished profile has no public name in five functions; friends list keeps a row for a friend without a public profile |
 | #72 | `26c3779` | Migration `20261125230000`: package A (block, comment and friendship access; media parent errors; view security_barrier) |
 | #74 | `7811c8d` | Migration `20261125233000`: package B (banned users cannot write content) |
+| #76 | `01a28bc` | Package C (upload worker hardening, account-deletion media sweep, 2 GiB free quota, worker rate limits); worker and `delete-account` deployed, no migration |
 
 `20261125210000` is applied to production (remote head on 2026-11-25).
 
@@ -233,8 +237,15 @@ authors can read (so delete) their own comments. Left open:
 Outcome of C (2026-11-25, branch `fix/upload-worker-hardening`; reviewed by
 a Codex challenge and the `sporely-security-reviewer` agent; owner chose a
 2 GiB free quota, worker rate limits of 300/60/60 per minute, and refusing
-octet-stream). Not yet merged or deployed. All four items are closed as
-written:
+octet-stream). Merged as `01a28bc` and deployed on 2026-11-26 (worker
+`fc0bcc1a`, then `delete-account` version 4). Read-only smoke test after
+deploy: `/healthz` reports the brake and the three limiters, the 426 brake
+probe passed, `POST /account/media-sweep` without or with a malformed token
+returns 401, `/reverse-location` returns 200, and `delete-account` answers
+OPTIONS with 204 and an unauthenticated call with 401. The previous worker
+version was `e1ae9a06`; do not roll back to it while `delete-account`
+version 4 or later is live (see the worker README). All four items are
+closed as written:
 
 - C1: uploads from an account with no `profiles` row get 403
   `profile_missing`; after its final write an upload looks the profile up
