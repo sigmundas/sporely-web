@@ -1,4 +1,4 @@
-import { DeleteObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3'
+import { DeleteObjectCommand, DeleteObjectsCommand, HeadObjectCommand, ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3'
 import { parsePrivateBucketSetting } from '../_shared/r2Buckets.ts'
 
 const DEFAULT_TOMBSTONE_RESTORE_WINDOW_DAYS = 30
@@ -42,6 +42,8 @@ export async function handleAdminAction(context: AdminActionContext): Promise<Ad
       return purgeExpiredTombstonedImages(context)
     case 'sweep_retired_media_keys':
       return sweepRetiredMediaKeys(context)
+    case 'sweep_orphan_media_prefixes':
+      return sweepOrphanMediaPrefixes(context)
     case 'dismiss_report':
       return updateReportStatus(context, 'dismissed')
     case 'resolve_report':
@@ -1495,6 +1497,257 @@ export async function runRetiredKeySweep(
   }
 
   return { counts, rows }
+}
+
+// ── Orphan prefix sweep ──────────────────────────────────────────────
+//
+// Deletes the media left under '<user_id>/' after an account is gone: a late
+// upload that landed after delete-account's last sweep (the Worker's
+// post-write profile check fails open on a lookup or delete error), or a
+// deletion run that got past delete_profile and was never retried.
+// public.media_prefix_owner_status (20261126130000) decides which prefixes
+// may be swept; nothing else is deleted. Per prefix: list the objects, check
+// the owner again, then delete exactly the listed objects, so an object
+// written after the listing is never touched and an owner that changed in
+// between stops the delete. Dry run by default; a real run also needs the
+// tombstone purge switch. No quota accounting: the profile is gone.
+
+const ORPHAN_SWEEP_PREFIX_LIMIT_DEFAULT = 20
+const ORPHAN_SWEEP_PREFIX_LIMIT_MAX = 200
+const ORPHAN_SWEEP_OBJECT_BUDGET = 50_000
+const OWNER_STATUS_BATCH = 500
+
+export type OrphanSweepObject = { bucket: string; key: string; size: number }
+
+export type OrphanSweepR2Client = {
+  buckets: string[]
+  listTopLevelPrefixes: () => Promise<string[]>
+  listObjects: (prefix: string) => Promise<OrphanSweepObject[]>
+  deleteObjects: (objects: OrphanSweepObject[]) => Promise<void>
+}
+
+type OwnerStatus = {
+  user_id: string
+  has_profile: boolean
+  has_auth_user: boolean
+  deletion_marked: boolean
+  sweepable: boolean
+}
+
+async function sweepOrphanMediaPrefixes(context: AdminActionContext): Promise<AdminActionResponse> {
+  const reason = requireNonEmptyText(context.requestBody?.reason, 'Reason is required')
+  if (!reason.ok) {
+    return actionFailureResponse(400, reason.code, reason.message)
+  }
+  const dryRun = context.requestBody?.dry_run !== false
+  if (!dryRun && !isTombstonePurgeEnabled(context.env)) {
+    return actionFailureResponse(409, TOMBSTONE_PURGE_DISABLED, 'Tombstone purge (and the orphan prefix sweep) is disabled on the server; a dry run is still allowed')
+  }
+  const limit = Math.min(ORPHAN_SWEEP_PREFIX_LIMIT_MAX, normalizePositiveInteger(context.requestBody?.limit, ORPHAN_SWEEP_PREFIX_LIMIT_DEFAULT))
+
+  return await withAdminActionLog({
+    adminClient: context.adminClient,
+    adminUser: context.adminUser,
+    action: 'sweep_orphan_media_prefixes',
+    targetType: 'media_prefix_batch',
+    targetId: `limit:${limit}:dry_run:${dryRun}`,
+    reason: reason.value,
+    requestPayload: context.requestBody,
+    beforeSnapshot: { limit, dry_run: dryRun },
+    run: async () => runOrphanPrefixSweep(context, { limit, dryRun }),
+  })
+}
+
+async function loadOwnerStatuses(adminClient: any, userIds: string[]): Promise<Map<string, OwnerStatus>> {
+  const statuses = new Map<string, OwnerStatus>()
+  for (let i = 0; i < userIds.length; i += OWNER_STATUS_BATCH) {
+    const batch = userIds.slice(i, i + OWNER_STATUS_BATCH)
+    const { data, error } = await callRpcWithRetry(adminClient, 'media_prefix_owner_status', { p_user_ids: batch })
+    if (error) {
+      throw actionError(500, 'owner_status_failed', `media_prefix_owner_status failed: ${error.message || error.code}`)
+    }
+    for (const row of Array.isArray(data) ? data : []) {
+      const id = normalizeText(row?.user_id).toLowerCase()
+      if (id) statuses.set(id, row as OwnerStatus)
+    }
+  }
+  return statuses
+}
+
+function ownerState(status: OwnerStatus | undefined): 'live' | 'sweepable' | 'needs_review' {
+  if (!status) return 'needs_review' // not classified: never deleted
+  if (status.has_profile) return 'live'
+  return status.sweepable === true ? 'sweepable' : 'needs_review'
+}
+
+export async function runOrphanPrefixSweep(
+  context: Pick<AdminActionContext, 'adminClient' | 'env'>,
+  options: { limit: number; dryRun: boolean },
+  clientFactory: (env: Record<string, string | undefined>) => OrphanSweepR2Client = createOrphanSweepR2Client,
+) {
+  const client = clientFactory(context.env)
+  const counts = {
+    prefixes_scanned: 0,
+    non_uuid_skipped: 0,
+    live: 0,
+    needs_review: 0,
+    sweepable: 0,
+    would_delete: 0,
+    swept: 0,
+    owner_changed: 0,
+    deferred: 0,
+    errors: 0,
+    objects_deleted: 0,
+    bytes_deleted: 0,
+  }
+  const rows: Array<Record<string, unknown>> = []
+
+  const names = [...new Set(await client.listTopLevelPrefixes())]
+  counts.prefixes_scanned = names.length
+  // Only canonical lowercase user ids: other names (legacy folders, an id in
+  // another case) are not keys the app writes under '<user_id>/', so they are
+  // counted and left alone.
+  const canonical = names.filter(name => isValidTombstoneUuid(name) && name === name.toLowerCase())
+  counts.non_uuid_skipped = names.length - canonical.length
+
+  const statuses = await loadOwnerStatuses(context.adminClient, canonical)
+  const candidates: string[] = []
+  for (const userId of canonical) {
+    const state = ownerState(statuses.get(userId))
+    if (state === 'live') counts.live += 1
+    else if (state === 'needs_review') {
+      counts.needs_review += 1
+      const status = statuses.get(userId)
+      rows.push({
+        user_id: userId,
+        status: 'needs_review',
+        has_auth_user: status?.has_auth_user ?? null,
+        deletion_marked: status?.deletion_marked ?? null,
+      })
+    } else candidates.push(userId)
+  }
+  counts.sweepable = candidates.length
+
+  let objectBudget = ORPHAN_SWEEP_OBJECT_BUDGET
+  for (const userId of candidates.slice(0, options.limit)) {
+    const prefix = `${userId}/`
+    try {
+      const objects = (await client.listObjects(prefix)).filter(object => object.key.startsWith(prefix))
+      const bytes = objects.reduce((sum, object) => sum + Math.max(0, Number(object.size) || 0), 0)
+      if (options.dryRun) {
+        counts.would_delete += 1
+        rows.push({ user_id: userId, status: 'would_delete', objects: objects.length, bytes, buckets: [...new Set(objects.map(o => o.bucket))] })
+        continue
+      }
+      if (objects.length > objectBudget) {
+        counts.deferred += 1
+        rows.push({ user_id: userId, status: 'deferred', objects: objects.length, bytes })
+        continue
+      }
+      // Re-check after listing: only objects listed while the account was
+      // still gone are deleted.
+      const recheck = ownerState((await loadOwnerStatuses(context.adminClient, [userId])).get(userId))
+      if (recheck !== 'sweepable') {
+        counts.owner_changed += 1
+        rows.push({ user_id: userId, status: 'owner_changed', owner: recheck })
+        continue
+      }
+      await client.deleteObjects(objects)
+      objectBudget -= objects.length
+      counts.swept += 1
+      counts.objects_deleted += objects.length
+      counts.bytes_deleted += bytes
+      rows.push({ user_id: userId, status: 'swept', objects: objects.length, bytes })
+    } catch (error) {
+      const failure = normalizeActionFailure(error)
+      counts.errors += 1
+      rows.push({ user_id: userId, status: 'error', error: failure.message })
+    }
+  }
+
+  return { dry_run: options.dryRun, buckets: client.buckets, counts, rows }
+}
+
+// S3-compatible listing client for the orphan sweep. Unlike createR2Client it
+// needs R2_PRIVATE_BUCKET_NAME set (a bucket name or 'none'): a sweep that
+// silently skipped the private bucket would report a clean result.
+export function createOrphanSweepR2Client(env: Record<string, string | undefined>): OrphanSweepR2Client {
+  const accessKeyId = normalizeText(env.R2_ACCESS_KEY_ID)
+  const secretAccessKey = normalizeText(env.R2_SECRET_ACCESS_KEY)
+  const endpoint = normalizeText(env.R2_S3_ENDPOINT).replace(/\/+$/, '')
+  if (!accessKeyId || !secretAccessKey || !endpoint) {
+    throw actionError(500, 'missing_r2_configuration', 'R2 is not configured')
+  }
+  const privateSetting = parsePrivateBucketSetting(env.R2_PRIVATE_BUCKET_NAME)
+  if (!privateSetting.configured) {
+    throw actionError(500, 'missing_r2_configuration', 'R2_PRIVATE_BUCKET_NAME must be set (the bucket name or none)')
+  }
+  const legacy = normalizeText(env.R2_BUCKET_NAME) || R2_BUCKET_NAME
+  const buckets = [...new Set([legacy, privateSetting.bucket].filter((b): b is string => Boolean(b)))]
+  const s3 = new S3Client({ region: R2_REGION, endpoint, credentials: { accessKeyId, secretAccessKey } })
+
+  return {
+    buckets,
+    async listTopLevelPrefixes() {
+      const names = new Set<string>()
+      try {
+        for (const bucket of buckets) {
+          let token: string | undefined
+          do {
+            const page = await s3.send(new ListObjectsV2Command({ Bucket: bucket, Delimiter: '/', ContinuationToken: token, MaxKeys: 1000 }))
+            for (const entry of page.CommonPrefixes ?? []) {
+              const name = String(entry.Prefix ?? '').replace(/\/$/, '')
+              if (name) names.add(name)
+            }
+            token = page.IsTruncated ? page.NextContinuationToken : undefined
+          } while (token)
+        }
+      } catch (error) {
+        const failure = normalizeR2SdkFailure(error, 'R2 list failed')
+        throw actionError(failure.status, 'r2_list_failed', failure.message)
+      }
+      return [...names]
+    },
+    async listObjects(prefix: string) {
+      if (!/^[0-9a-f-]{36}\/$/.test(prefix)) throw actionError(400, 'invalid_prefix', 'Refusing to list a prefix that is not <user_id>/')
+      const objects: OrphanSweepObject[] = []
+      try {
+        for (const bucket of buckets) {
+          let token: string | undefined
+          do {
+            const page = await s3.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: token, MaxKeys: 1000 }))
+            for (const item of page.Contents ?? []) {
+              if (item.Key) objects.push({ bucket, key: item.Key, size: Number(item.Size ?? 0) })
+            }
+            token = page.IsTruncated ? page.NextContinuationToken : undefined
+          } while (token)
+        }
+      } catch (error) {
+        const failure = normalizeR2SdkFailure(error, 'R2 list failed')
+        throw actionError(failure.status, 'r2_list_failed', failure.message)
+      }
+      return objects
+    },
+    async deleteObjects(objects: OrphanSweepObject[]) {
+      for (const bucket of buckets) {
+        const keys = objects.filter(object => object.bucket === bucket).map(object => object.key)
+        for (let i = 0; i < keys.length; i += 1000) {
+          let errors = 0
+          try {
+            const result = await s3.send(new DeleteObjectsCommand({
+              Bucket: bucket,
+              Delete: { Objects: keys.slice(i, i + 1000).map(Key => ({ Key })), Quiet: true },
+            }))
+            errors = result.Errors?.length ?? 0
+          } catch (error) {
+            const failure = normalizeR2SdkFailure(error, 'R2 delete failed')
+            throw actionError(failure.status, 'r2_delete_failed', failure.message)
+          }
+          if (errors) throw actionError(502, 'r2_delete_partial_failure', `${errors} delete error(s) in ${bucket}; retry the sweep`)
+        }
+      }
+    },
+  }
 }
 
 async function updateTombstonePurgeMetadata(adminClient: any, imageId: unknown, payload: Record<string, unknown>) {
