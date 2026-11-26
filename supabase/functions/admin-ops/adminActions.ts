@@ -2031,7 +2031,7 @@ const MEDIA_VARIANT_PREFIX = /^(?:thumb_|small_|medium_|cards_|preview_)/
 // same key debit once between them: whichever runs second finds the object
 // gone, prepares 0 bytes and finalizes nothing new. If both measured the
 // object before either deleted it, the second prepare does not re-open the
-// first one's finalized entry, because the key is retired (20261120120000
+// first one's finalized entry, because the key is retired (20261126120000
 // section 13). A crash or a partial bucket failure between the delete and
 // the finalize is finished by the next attempt, because prepare keeps the
 // larger earlier snapshot of each key until its row is finalized.

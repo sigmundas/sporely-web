@@ -70,7 +70,7 @@ WITH o AS (
 ) INSERT INTO fx SELECT 'obs_bad', id FROM o;
 
 -- Trusted (postgres, no sub) insert of the malformed row: user_id equals the
--- observation owner A, key under V's prefix. Since 20261120120000 the
+-- observation owner A, key under V's prefix. Since 20261126120000 the
 -- media-key guard refuses it for every role (asserted next), so the legacy
 -- row is planted with that one trigger disabled; the read-time check must
 -- still deny it.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Two-session races for 20261120120000_media_key_retirement.sql (Stage 0a of
+# Two-session races for 20261126120000_media_key_retirement.sql (Stage 0a of
 # docs/plans/active/2026-10-20-media-key-retirement-and-cloud-copy-delete.md,
 # "media_key_retirement_concurrency_test.sh").
 #

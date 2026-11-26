@@ -1292,7 +1292,7 @@ BEGIN
     RETURNING id INTO bad_owner_img;
 
     -- Malformed legacy rows (keys outside the owner namespace). Since
-    -- 20261120120000 the media-key guard refuses such writes for every role,
+    -- 20261126120000 the media-key guard refuses such writes for every role,
     -- so they are planted with that one trigger disabled, as rows written
     -- before the guard existed; the read-side checks below still apply.
     BEGIN
