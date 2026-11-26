@@ -465,7 +465,7 @@ Done:
   `purgeSingleTombstoneRow` before any R2 call or row write. Edge-function env is fixed per
   invocation, so the per-row check stops a run only through a fresh deploy/secret change;
   drain evidence (action log, max runtime) is still required before 0a.
-- Stage 0a migration `supabase/migrations/20261120120000_media_key_retirement.sql`.
+- Stage 0a migration `supabase/migrations/20261126120000_media_key_retirement.sql`.
 - Stage 0a item 8 (claim-aware admin-ops purge and `sweep_retired_media_keys`), behind the
   same flag. Deploy it only at rollout step 4.
 - Tests: `supabase/tests/media_key_retirement_test.sql`,
@@ -846,11 +846,50 @@ failures as on main), §K fixture (42 cases), REST and concurrency (46 races) pa
   private bucket, the rerun no longer sends that key to the Worker, and the prefix passes cannot
   see the private bucket. Both faults are needed; the configuration check before the sign-out is
   the place to catch the first.
-- 9 (late Worker PUT after the empty check): not on this branch; Stage 0b Worker work.
-  - The Worker checks the account-deletion marker before the write and again right after the R2
-    put, and deletes what it just wrote if the marker exists by then. A write that lands before the
-    marker is removed by the prefix delete; one that lands after is removed by the Worker itself.
-  - An admin-ops orphan-prefix sweep lists top-level `<uid>/` prefixes in each bucket and deletes
-    those with no matching account. This also cleans up crashed or abandoned runs.
-- Rollout rule: do not deploy delete-account (with this branch's stages) before the Stage 0b Worker
-  fence is live.
+- 9 (late Worker PUT after the empty check): the R2 side is now covered by main's Worker work
+  (merged 2026-11-26, see below), not by this branch.
+  - Original plan (Stage 0b): the Worker checks the account-deletion marker before the write and
+    again right after the R2 put, and deletes what it just wrote if the marker exists by then.
+  - What main has instead: the Worker refuses uploads from an account without a profile row, looks
+    the profile up again after its final write and deletes that write when the profile is gone, and
+    `POST /account/media-sweep` deletes everything under `<uid>/` once the profile is deleted.
+    delete-account calls that sweep after `delete_profile` (stage `sweep_r2_prefix`) and checks the
+    route first (`sweep_preflight`). A write that finished before the post-write lookup is seen by
+    the sweep; a later one is removed by the Worker itself. The account-deletion marker check is
+    therefore no longer needed for R2.
+  - Still open, optional: an admin-ops orphan-prefix sweep for abandoned runs (profile deleted,
+    sweep never completed, the user never retries).
+- Rollout rule: delete-account with this branch's stages needs main's Worker (sweep route and
+  profile fence) live. `sweep_preflight` enforces this at run time: without the route it stops
+  before anything is deleted.
+
+## Second merge of main (2026-11-26); still not deployed
+
+- Merged `origin/main` (no rebase, no force-push). delete-account conflicts resolved: main's
+  `sweep_preflight` (first stage) and `sweep_r2_prefix` (after `delete_profile`) are kept alongside
+  this branch's R2 check, sign-out, fence, prefix passes, emptiness check, registry erase and rerun.
+  Stage order: `sweep_preflight`, `check_r2_configuration`, `sign_out_everywhere`,
+  `begin_account_deletion`, ..., `erase_media_retirements`, `delete_profile`, `sweep_r2_prefix`,
+  `delete_auth_user`. The rerun stays within `media_snapshot`..`erase_media_retirements`. A retry
+  after `delete_profile` still gets `fenced` (begin_account_deletion checks `auth.users`).
+- The migration is renumbered `20261120120000` → `20261126120000`. `supabase migration list`
+  before the change: main's `20261125210000`, `20261125230000` and `20261125233000` are applied
+  remotely; this file never was; only the deferred `20260914090000` is otherwise local-only.
+- Re-checked against main's three new migrations: none creates, replaces or drops an object this
+  migration touches. `20261125233000` adds `trg_000_writer_not_banned` (BEFORE INSERT OR UPDATE) to
+  all five guarded tables; it sorts before `zzy_media_key_retirement_guard`, so the guard only sees
+  writes the ban check let through. Service-role paths (purge claim and finalize, sweep, account
+  erase) have no `auth.uid()` and pass it. A banned user's `release_observation_image_bytes` is
+  refused (`sporely_account_suspended`, nothing changed, no registry record), as main's rule for
+  SECURITY DEFINER RPCs intends; the user can still tombstone the image, and the purge erases it.
+  New SQL test; break-checked by disabling the ban trigger.
+
+Local verification (isolated stack, Postgres 17.6.1.084):
+- SQL: 91 of 94 pass; the same 3 fail on main (`public_observation_point_prep_test.sql`, and the
+  two `public_observation_spore_previews_*` pgTAP tests without `plan()`).
+- Shell: §K fixture (42 cases), REST, concurrency (46 races) pass. Node 1857 pass / 0 fail
+  (`node --test $(git ls-files '*.test.js' '*.test.mjs')`); Deno admin-ops 54/54, r2Prefix 6/6;
+  `deno check` of delete-account passes; admin-ops' only error is the pre-existing TS2345 in
+  `index.ts:123` (file identical to main).
+
+Deploy with `node scripts/supabase-deploy-tree.mjs prepare --allow 20261126120000 ...`.
