@@ -291,6 +291,9 @@ async function _blobToStoredBytes(blob) {
   }
 }
 
+// Every caller closes the connection it opened once its transaction settles
+// (close() lets in-flight transactions finish). Leaving connections open leaks
+// one per queue operation and blocks any later version change of the database.
 function openDB() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, 1)
@@ -359,13 +362,25 @@ function _pruneQueuedPreviewUrls(activeIds) {
 
 async function _readQueueItems() {
   const db = await openDB()
-  const tx = db.transaction(STORE_NAME, 'readonly')
-  const store = tx.objectStore(STORE_NAME)
-  return readAll(store)
+  try {
+    const tx = db.transaction(STORE_NAME, 'readonly')
+    const store = tx.objectStore(STORE_NAME)
+    return await readAll(store)
+  } finally {
+    db.close()
+  }
 }
 
 async function _updateQueueItem(itemId, updater) {
   const db = await openDB()
+  try {
+    return await _updateQueueItemInDb(db, itemId, updater)
+  } finally {
+    db.close()
+  }
+}
+
+function _updateQueueItemInDb(db, itemId, updater) {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, 'readwrite')
     const store = tx.objectStore(STORE_NAME)
@@ -391,12 +406,18 @@ async function _updateQueueItem(itemId, updater) {
 
 async function _deleteQueueItem(itemId) {
   const db = await openDB()
-  await new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, 'readwrite')
-    tx.objectStore(STORE_NAME).delete(itemId)
-    tx.oncomplete = resolve
-    tx.onerror = () => reject(tx.error)
-  })
+  try {
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite')
+      tx.objectStore(STORE_NAME).delete(itemId)
+      tx.oncomplete = resolve
+      tx.onerror = () => reject(tx.error)
+      // A commit failure fires only abort, so without this the delete never settles.
+      tx.onabort = () => reject(tx.error || new Error('Queue delete aborted'))
+    })
+  } finally {
+    db.close()
+  }
   _revokeQueuedPreviewUrl(itemId)
 }
 
@@ -537,7 +558,6 @@ export async function enqueueObservation(obsPayload, imageEntries) {
 async function _enqueueObservation(obsPayload, imageEntries) {
   const queuedImages = _normalizeQueuedImages(imageEntries)
   const persistentImages = await _serializeQueuedImagesForStorage(queuedImages)
-  const db = await openDB()
   const queueUserId = _normalizeQueueUserId(obsPayload.user_id)
   // Keys are minted once, at queue time, and persisted with the item so every
   // retry repeats the same POST.
@@ -550,7 +570,8 @@ async function _enqueueObservation(obsPayload, imageEntries) {
     ts: Date.now(),
   }
 
-  return new Promise((resolve, reject) => {
+  const db = await openDB()
+  const written = new Promise((resolve, reject) => {
     // Strict: oncomplete fires only once the item is flushed to disk, so a
     // caller may then drop its own copy. Engines without the option ignore it.
     const tx = db.transaction(STORE_NAME, 'readwrite', { durability: 'strict' })
@@ -566,6 +587,11 @@ async function _enqueueObservation(obsPayload, imageEntries) {
     tx.onerror = () => reject(tx.error)
     tx.onabort = () => reject(tx.error || new Error('Queue write aborted'))
   })
+  try {
+    return await written
+  } finally {
+    db.close()
+  }
 }
 
 // A target that predates the provenance migration rejects the two columns:

@@ -131,7 +131,15 @@ BEGIN
   IF result->>'status' <> 'account_unavailable' THEN
     RAISE EXCEPTION 'banned reporter reached intake: %', result;
   END IF;
+  -- Unban as an admin would: without the banned user's JWT claims, which
+  -- 20261125233000 refuses for a profile update. Claims are restored after.
+  PERFORM set_config('test.saved_claims', coalesce(current_setting('request.jwt.claims', true), ''), true),
+          set_config('test.saved_sub', coalesce(current_setting('request.jwt.claim.sub', true), ''), true),
+          set_config('request.jwt.claims', '', true),
+          set_config('request.jwt.claim.sub', '', true);
   UPDATE public.profiles SET is_banned = false WHERE id = reporter_b;
+  PERFORM set_config('request.jwt.claims', current_setting('test.saved_claims'), true),
+          set_config('request.jwt.claim.sub', current_setting('test.saved_sub'), true);
   INSERT INTO private.reference_account_deletions(user_id) VALUES(reporter_b);
   result := public.report_curated_reference_set(set_id, 1, 'duplicate', NULL, gen_random_uuid());
   IF result->>'status' <> 'account_deleting' THEN

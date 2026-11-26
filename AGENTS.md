@@ -7,6 +7,27 @@ update the canonical active plan's current-stage/handoff record before stopping,
 including verification, commit or manual-test status, and deferred work. Final
 review occurs in a fresh top-level sparring session.
 
+## Production access — read-only by default
+
+- Agents may inspect production databases, schema/SQL definitions, logs, and
+  files/storage objects without separate approval. Use read-only credentials,
+  endpoints, and transactions where available; verify the production target.
+- Production writes require asking the user first and receiving explicit approval
+  for the specific operation in the current conversation. Present the target,
+  exact SQL/command or file changes, expected effects, and relevant validation
+  before asking. Task assignment, a plan, or tool access alone is not approval.
+- After approval, agents may execute that operation through the approved
+  repository/runbook path, with all prechecks and deployment guards intact.
+  Approval persists for that operation; ask again if its target or scope changes.
+- Writes include data/schema/permission changes, migrations, mutating RPCs,
+  imports, uploads, overwrites, moves/deletions, deployments, and scripts/tests
+  or app sync that change production state. A SELECT that calls a mutating
+  function is a write. If side effects are uncertain, treat the operation as a
+  write and ask first.
+- Do not bypass a tool approval prompt, weaken access controls, or expose secrets
+  or private production data in logs/reports. Local development edits and isolated
+  local/test databases are outside this production approval rule.
+
 ## Supabase migration safety
 
 Supabase migration history is production state. Treat it as immutable unless the user
@@ -47,11 +68,11 @@ true:
    present the exact operation and validation results before execution unless
    the user already explicitly authorized that exact operation.
 
-Read-only production checks may be run without separate approval when required
-by an approved runbook.
+Read-only production checks may be run without separate approval under the
+production access rule above; they are not limited to runbook checks.
 
 Do not interpret "agent" as a blanket prohibition on production writes. A
-guarded production write with explicit current-turn user authorization is
+guarded production write with explicit current-conversation user approval is
 permitted.
 
 ### Intentional migration-order gap

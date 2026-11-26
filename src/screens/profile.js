@@ -1175,19 +1175,40 @@ async function _loadFriends() {
   const { data: profiles } = await supabase
     .from('public_profiles').select('id, username, display_name').in('id', friendIds)
 
-  list.innerHTML = (profiles || []).map(p => {
-    const label = p.username ? `@${p.username}` : (p.display_name || p.id)
-    const initial = label.replace('@', '')[0]?.toUpperCase() || '?'
-    return `<div class="friend-row">
-      <div class="friend-avatar">${initial}</div>
-      <div class="friend-email">${_esc(label)}</div>
-      <button class="friend-remove-btn" data-id="${p.id}">${t('profile.remove')}</button>
-    </div>`
-  }).join('')
+  list.innerHTML = _friendRowsHtml(friendIds, profiles)
 
   list.querySelectorAll('.friend-remove-btn').forEach(btn => {
     btn.addEventListener('click', () => _removeFriend(btn.dataset.id))
   })
+}
+
+// An account with no public name still needs a stable way to tell it from
+// another one in the same list, so the row shows the start of its id.
+function _unnamedAccountLabel(id) {
+  return `${t('common.unknown')} · ${String(id || '').slice(0, 8)}`
+}
+
+// One row per accepted friendship, not per profile returned. public_profiles
+// leaves out accounts that are banned, in a block relationship, or have not
+// finished setup; the friendship still grants them access to friends-only
+// finds, so the row and its Remove button must stay.
+function _friendRowsHtml(friendIds, profiles) {
+  const profilesById = new Map((profiles || []).map(p => [p.id, p]))
+  // Crossed requests can leave two accepted rows for one person.
+  return [...new Set(friendIds || [])].map(friendId => {
+    const p = profilesById.get(friendId)
+    const label = p?.username ? `@${p.username}` : (p?.display_name || _unnamedAccountLabel(friendId))
+    const initial = label.replace('@', '')[0]?.toUpperCase() || '?'
+    return `<div class="friend-row">
+      <div class="friend-avatar">${_esc(initial)}</div>
+      <div class="friend-email">${_esc(label)}</div>
+      <button class="friend-remove-btn" data-id="${_esc(friendId)}">${t('profile.remove')}</button>
+    </div>`
+  }).join('')
+}
+
+export function friendRowsHtmlForTests(friendIds, profiles) {
+  return _friendRowsHtml(friendIds, profiles)
 }
 
 // ── Pending requests ──────────────────────────────────────────────────────────
@@ -1286,7 +1307,7 @@ async function _loadBlocked() {
 }
 
 function _blockedUserRowHtml(row) {
-  const label = row.username ? `@${row.username}` : (row.display_name || t('common.unknown'))
+  const label = row.username ? `@${row.username}` : (row.display_name || _unnamedAccountLabel(row.blocked_id))
   const initial = label.replace('@', '')[0]?.toUpperCase() || '?'
   const avatarHtml = row.avatar_url
     ? `<img src="${_esc(row.avatar_url)}" alt="" class="friend-avatar" style="object-fit:cover;border-radius:50%">`

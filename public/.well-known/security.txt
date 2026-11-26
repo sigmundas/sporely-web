@@ -1,0 +1,6 @@
+# Security contact for the Sporely web app (app.sporely.no).
+# Please report vulnerabilities here rather than in a public issue.
+Contact: mailto:contact@sporely.no
+Expires: 2027-11-25T00:00:00.000Z
+Preferred-Languages: en, nb
+Canonical: https://app.sporely.no/.well-known/security.txt

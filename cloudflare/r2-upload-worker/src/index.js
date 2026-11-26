@@ -161,6 +161,11 @@ async function handleRequest(request, env, ctx) {
           hasMediaBucket: !!env.MEDIA_BUCKET,
           hasPrivateMediaBucket: !!env.PRIVATE_MEDIA_BUCKET,
         },
+        rateLimiters: {
+          upload: !!env.UPLOAD_RATE_LIMITER,
+          artsorakel: !!env.ARTSORAKEL_RATE_LIMITER,
+          location: !!env.LOCATION_RATE_LIMITER,
+        },
         legacyBucketBound: !!env.MEDIA_BUCKET,
         privateBucketBound: !!env.PRIVATE_MEDIA_BUCKET,
         mediaVariants: Array.from(MEDIA_VARIANTS),
@@ -206,6 +211,10 @@ async function handleRequest(request, env, ctx) {
     return handleDelete(request, env, ctx, url)
   }
 
+  if (request.method === 'POST' && url.pathname === '/account/media-sweep') {
+    return handleAccountMediaSweep(request, env, ctx)
+  }
+
   // Stage 2 image-media delivery route: image-ID + variant based.
   if (request.method === 'GET' && url.pathname.startsWith('/m/')) {
     return handleMediaDelivery(request, env, ctx, url)
@@ -226,6 +235,11 @@ async function handleReverseLocation(request, env, url) {
   if (request.headers.get('Origin') && !origin) {
     throw httpError(403, 'origin_not_allowed', 'Origin is not allowed')
   }
+
+  await enforceRateLimit(
+    env.LOCATION_RATE_LIMITER,
+    `location:${request.headers.get('CF-Connecting-IP') || 'unknown'}`,
+  )
 
   const lat = Number(url.searchParams.get('lat'))
   const lon = Number(url.searchParams.get('lon'))
@@ -299,6 +313,27 @@ async function handleReverseLocation(request, env, url) {
     env,
     origin,
   )
+}
+
+/**
+ * Cloudflare rate-limit binding check (wrangler.toml `[[ratelimits]]`).
+ * Limits are per Cloudflare location and approximate; they brake scripted
+ * abuse, not normal use. An unbound limiter (local tests, a misconfigured
+ * deploy) or a limiter error lets the request through: the routes stay
+ * authenticated and quota-checked regardless.
+ */
+async function enforceRateLimit(limiter, key) {
+  if (!limiter || typeof limiter.limit !== 'function') return
+  let outcome
+  try {
+    outcome = await limiter.limit({ key })
+  } catch (error) {
+    console.error('[r2-upload-worker] rate limiter failed; allowing request', safeOperationError(error))
+    return
+  }
+  if (outcome && outcome.success === false) {
+    throw httpError(429, 'rate_limited', 'Too many requests; try again in a minute')
+  }
 }
 
 function handleOptions(request, env) {
@@ -402,6 +437,7 @@ async function handleUpload(request, env, ctx, url) {
   if (!claims?.sub || !key.startsWith(`${claims.sub}/`)) {
     throw httpError(403, 'key_not_allowed', 'Upload key must start with the authenticated user id')
   }
+  await enforceRateLimit(env.UPLOAD_RATE_LIMITER, `upload:${claims.sub}`)
 
   const contentLength = parseIntegerHeader(request.headers.get('Content-Length'))
   const maxUploadBytes = parsePositiveInt(env.MAX_UPLOAD_BYTES, DEFAULT_MAX_UPLOAD_BYTES)
@@ -463,25 +499,37 @@ async function handleUpload(request, env, ctx, url) {
   // directly to `key` and then roll back on a downstream failure —
   // the original bytes are already gone.
   //
-  // For private mode, when an object already exists we:
+  // In both storage modes, when an object already exists we:
   //   1. Write the new body to a temporary key `<key>.pending-<nonce>`.
-  //   2. Run quota + canonical_bucket finalization.
+  //   2. Run quota (and, in private mode, canonical_bucket) finalization.
   //   3. On success: copy temp → final (a fresh `put(key, tempBody)`),
   //      then delete the temp key.
   //   4. On any failure after step 1: delete ONLY the temp key. The
   //      original `key` object is untouched.
   //
   // For a first-write (no existingObject), the destination is
-  // unoccupied, so we write directly. In legacy mode we retain the
-  // historic behaviour for backward compatibility.
+  // unoccupied, so we write directly. Legacy mode used to write an
+  // overwrite straight to `key`, so a failed tally update deleted both the
+  // new and the previous bytes.
   const isOverwrite = existingObject !== null && existingObject !== undefined
-  const useTempKeyForOverwrite = canonicalBucket === 'private' && isOverwrite
+  const useTempKeyForOverwrite = isOverwrite
   const nonce = crypto.randomUUID().replace(/-/g, '')
   const writeKey = useTempKeyForOverwrite ? `${key}.pending-${nonce}` : key
   const resultingLogicalBytes = Math.max(bodyBytes, alternateLogicalBytes)
   const accountingStorageDelta = resultingLogicalBytes - existingLogicalBytes
   const storageDelta = Math.max(0, accountingStorageDelta)
+  // The profile lookup carries the ban, deletion and quota checks; without
+  // the service role all three would silently pass.
+  if (!hasSupabaseServiceRole(env)) {
+    throw httpError(503, 'upload_unavailable', 'Uploads need the profile lookup')
+  }
   const rawProfile = await fetchStorageProfile(env, claims.sub)
+  // A signed-in caller without a profile row is an account being deleted
+  // (or already deleted while its token is still valid). Its uploads would
+  // land after the deletion snapshot and stay in R2 for good.
+  if (hasSupabaseServiceRole(env) && !rawProfile) {
+    throw httpError(403, 'profile_missing', 'This account has no profile; uploads are refused')
+  }
   if (rawProfile?.is_banned === true) {
     throw httpError(403, 'user_banned', 'User is banned from uploading media')
   }
@@ -645,7 +693,7 @@ async function handleUpload(request, env, ctx, url) {
   const cacheControl = canonicalBucket === 'private'
     ? 'private, no-store'
     : LEGACY_PUBLIC_CACHE_CONTROL
-  const object = await uploadBucket.put(writeKey, bodyBuffer, {
+  let object = await uploadBucket.put(writeKey, bodyBuffer, {
     httpMetadata: {
       contentType,
       cacheControl,
@@ -690,6 +738,14 @@ async function handleUpload(request, env, ctx, url) {
     await rollbackWrittenBytesOnly()
     throw error
   }
+  // The tally update matched no profile row: the profile was deleted after
+  // the check above (account deletion running concurrently). Do not leave
+  // the object behind the deletion sweep.
+  if (trackedProfile === null && hasSupabaseServiceRole(env)
+      && (accountingStorageDelta || imageDelta)) {
+    await rollbackWrittenBytesOnly()
+    throw httpError(403, 'profile_missing', 'This account has no profile; uploads are refused')
+  }
 
   if (canonicalBucket === 'private'
       && (validatedImageId !== null || validatedMosaicId !== null)) {
@@ -715,7 +771,7 @@ async function handleUpload(request, env, ctx, url) {
   if (useTempKeyForOverwrite) {
     let promoted = false
     try {
-      await uploadBucket.put(key, bodyBuffer, {
+      object = await uploadBucket.put(key, bodyBuffer, {
         httpMetadata: { contentType, cacheControl },
         customMetadata: {
           user_id: String(claims.sub),
@@ -736,6 +792,12 @@ async function handleUpload(request, env, ctx, url) {
         },
       })
       promoted = true
+    } catch (promotionError) {
+      // Fall through to the compensation below; rethrowing here (as a bare
+      // try/finally did) skipped the tally reversal and charged the quota
+      // for bytes that were never published.
+      console.error('Failed to promote temp upload to the canonical key',
+        safeOperationError(promotionError))
     } finally {
       // Always delete the temp; even if promotion succeeded we don't
       // want the temp object lingering. If promotion failed, the
@@ -747,11 +809,8 @@ async function handleUpload(request, env, ctx, url) {
     }
     if (!promoted) {
       // Try to unwind the DB PATCH we made above so DB and R2 agree.
-      if (canonicalBucket === 'private' && validatedImageId !== null && !isOverwrite) {
-        // Only if we upgraded canonical_bucket; on overwrite the row
-        // was already 'private' before this request so no PATCH to
-        // undo. (For an overwrite, canonical_bucket is unchanged.)
-      }
+      // No canonical_bucket PATCH to undo: this path is an overwrite, so
+      // the row already had its bucket before this request.
       try {
         await applyStorageDelta(env, claims.sub, -accountingStorageDelta, -imageDelta)
       } catch (rollbackError) {
@@ -760,6 +819,18 @@ async function handleUpload(request, env, ctx, url) {
       throw httpError(500, 'promotion_failed',
         'Failed to promote temp upload to the canonical key; previous bytes preserved')
     }
+  }
+
+  // Account deletion fence. Deletion deletes the profile, then sweeps the
+  // prefix. Any write above that the sweep might have missed finished
+  // before this lookup, so if the profile still exists here the sweep has
+  // not run yet and will see the object; if it is gone, remove our own
+  // write. Covers zero-delta overwrites, which skip the tally check.
+  if (hasSupabaseServiceRole(env) && !await fetchStorageProfile(env, claims.sub)) {
+    await uploadBucket.delete(key).catch(deleteError => {
+      console.error('Failed to remove upload after its profile was deleted', deleteError)
+    })
+    throw httpError(403, 'profile_missing', 'This account has no profile; uploads are refused')
   }
 
   // Stage 2: only emit a public `url` while still writing to the legacy
@@ -947,6 +1018,93 @@ async function handleDelete(request, env, ctx, url) {
   )
 }
 
+// R2 list pages (of up to 1000 keys each) one sweep request may delete. The
+// caller repeats the request until it reports `done`, which keeps each
+// request well inside the Worker subrequest and CPU limits.
+export const ACCOUNT_SWEEP_MAX_PAGES = 5
+const ACCOUNT_SWEEP_PAGE_SIZE = 1000
+
+/**
+ * POST /account/media-sweep — the last media step of account deletion.
+ *
+ * Deletes every object under the caller's own `<sub>/` prefix in every
+ * configured bucket, including objects no database row points at (legacy
+ * uploads without an image row, uploads that landed after the deletion
+ * snapshot, abandoned `.pending-` temp keys).
+ *
+ * Only an account whose profile row is already gone may sweep: the
+ * delete-account function deletes the profile first, and uploads from an
+ * account without a profile are refused, so nothing can land behind the
+ * sweep. A live account can never wipe its own media through this route.
+ * No storage accounting is done; the profile that held it no longer exists.
+ */
+async function handleAccountMediaSweep(request, env, ctx) {
+  const origin = resolveAllowedOrigin(request, env)
+  if (request.headers.get('Origin') && !origin) {
+    throw httpError(403, 'origin_not_allowed', 'Origin is not allowed')
+  }
+
+  const token = parseBearerToken(request.headers.get('Authorization'))
+  const claims = await verifySupabaseJwt(token, env, ctx)
+  const sub = String(claims?.sub || '')
+  if (!/^[0-9A-Za-z][0-9A-Za-z-]{7,}$/.test(sub)) {
+    throw httpError(403, 'key_not_allowed', 'Token has no usable user id')
+  }
+  if (!hasSupabaseServiceRole(env)) {
+    throw httpError(503, 'sweep_unavailable', 'Media sweep needs the profile lookup')
+  }
+  if (await fetchStorageProfile(env, sub)) {
+    throw httpError(409, 'profile_exists', 'Media sweep runs only after the profile is deleted')
+  }
+
+  const bindings = configuredBucketRoles(env)
+  if (!bindings.length) {
+    throw httpError(500, 'missing_bucket', 'No R2 bucket bindings are configured')
+  }
+
+  const prefix = `${sub}/`
+  let pagesLeft = ACCOUNT_SWEEP_MAX_PAGES
+  let deleted = 0
+  let done = true
+  for (const { role, bucket } of bindings) {
+    let truncated = true
+    while (truncated) {
+      if (pagesLeft <= 0) {
+        done = false
+        break
+      }
+      pagesLeft -= 1
+      let listing
+      try {
+        listing = await bucket.list({ prefix, limit: ACCOUNT_SWEEP_PAGE_SIZE })
+      } catch (error) {
+        throw httpError(502, 'media_sweep_failed', `Could not list ${role} storage`, {
+          role, phase: 'list', error: safeOperationError(error),
+        })
+      }
+      // List again from the start after each delete instead of following
+      // the cursor: deleted keys drop out, so the next page is what is left.
+      const keys = (listing?.objects || [])
+        .map(object => String(object?.key || ''))
+        .filter(key => key.startsWith(prefix))
+      if (keys.length) {
+        try {
+          await bucket.delete(keys)
+        } catch (error) {
+          throw httpError(502, 'media_sweep_failed', `Could not delete from ${role} storage`, {
+            role, phase: 'delete', error: safeOperationError(error),
+          })
+        }
+        deleted += keys.length
+      }
+      truncated = !!listing?.truncated && keys.length > 0
+    }
+    if (!done) break
+  }
+
+  return jsonResponse({ ok: true, deleted, done }, 200, request, env, origin)
+}
+
 /**
  * Delete one logical object identity from every applicable bucket binding.
  * This deliberately does not consult MEDIA_STORAGE_MODE: old objects may
@@ -1049,7 +1207,13 @@ function assertStorageQuotaAllowsUpload(profile, storageDelta, env) {
 
   if (profile.cloudPlan === 'pro' || profile.hasProAccess === true) return
 
-  const quota = parseNonNegativeInt(profile.storageQuotaBytes, parseNonNegativeInt(env.FREE_STORAGE_QUOTA_BYTES, DEFAULT_FREE_STORAGE_QUOTA_BYTES))
+  // A per-profile quota wins when set. A null one falls back to the free-plan
+  // quota; Number(null) is 0, so it must not go through parseNonNegativeInt,
+  // which would read it as "unlimited" and ignore FREE_STORAGE_QUOTA_BYTES.
+  const freeQuota = parseNonNegativeInt(env.FREE_STORAGE_QUOTA_BYTES, DEFAULT_FREE_STORAGE_QUOTA_BYTES)
+  const quota = profile.storageQuotaBytes === null || profile.storageQuotaBytes === undefined
+    ? freeQuota
+    : parseNonNegativeInt(profile.storageQuotaBytes, freeQuota)
   if (!quota) return
 
   const used = parseNonNegativeInt(profile.storageUsedBytes, 0)
@@ -1197,7 +1361,8 @@ async function handleArtsorakel(request, env, ctx) {
 
   const authHeader = request.headers.get('Authorization')
   const token = parseBearerToken(authHeader)
-  await verifySupabaseJwt(token, env, ctx)
+  const claims = await verifySupabaseJwt(token, env, ctx)
+  await enforceRateLimit(env.ARTSORAKEL_RATE_LIMITER, `artsorakel:${claims?.sub || ''}`)
 
   const artsorakelToken = resolveArtsorakelToken(env)
 
@@ -1241,6 +1406,7 @@ async function handleArtsorakelMedia(request, env, ctx) {
   const authHeader = request.headers.get('Authorization')
   const token = parseBearerToken(authHeader)
   const claims = await verifySupabaseJwt(token, env, ctx)
+  await enforceRateLimit(env.ARTSORAKEL_RATE_LIMITER, `artsorakel:${claims?.sub || ''}`)
 
   const artsorakelToken = resolveArtsorakelToken(env)
 
@@ -1657,9 +1823,11 @@ export function applyStoredMediaSafetyHeaders(headers) {
  * deny-list of active types rather than a strict raster allow-list.
  */
 export function normalizeUploadContentType(raw) {
+  // Only raster image types. A missing type and application/octet-stream
+  // are refused: no Sporely client sends either, and accepting them made
+  // the public media host usable for arbitrary files.
   const value = String(raw || '').split(';', 1)[0].trim().toLowerCase()
-  if (!value) return 'application/octet-stream'
-  if (value === 'application/octet-stream') return value
+  if (!value) return null
   if (!/^image\/[a-z0-9][a-z0-9.+-]*$/.test(value)) return null
   if (/svg|xml/.test(value)) return null
   return value

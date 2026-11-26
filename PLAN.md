@@ -4,15 +4,58 @@
 
 `PLAN.md` is the active working plan for `sporely-web`.
 
-Historical image/upload notes are archived in `HISTORY.md`. Current image-pipeline notes are in `docs/image-pipeline-phase1.md`.
+Where work lives:
+
+- `PLAN.md` (this file): the unstaged backlog and open decisions.
+- `docs/plans/active/`: staged plans with their own status lines.
+  `docs/plans/completed/`: closed plans, kept as the record.
+- `PLAN-startup.md`: Stage C data caches (Finds list, observation detail).
+- `PLAN-heic-originals.md`: HEIC/HDR original preservation (client phases not
+  started; Worker and `original_storage_path` groundwork exists).
+- `INBOX.md`: unsorted ideas and the open November 2026 security-review findings.
+- `docs/manual-qa.md`: every device check without a recorded result.
+- `HISTORY.md`: debugging history and gotchas. Image-pipeline notes:
+  `docs/plans/completed/image-pipeline-phase1.md`.
 
 # Plan review status
 
-Last audited against the repository on 2026-08-13 (`0.7.0`, Android
-`versionCode 277`). Completed implementation detail belongs in `HISTORY.md`;
-this file retains only open work and decisions.
+Last audited against the repository on 2026-11-22 (v0.7.19, `703fe99`); the
+previous full audit was 2026-08-13 (`0.7.0`). Completed implementation detail
+belongs in `HISTORY.md` or the closed plan; this file retains only open work
+and decisions.
+
+## Follow-ups from closed plans (2026-11-22)
+
+- [ ] **Sync-key cutover and cleanup.** Deferred section of
+      `docs/plans/completed/2026-10-14-sync-key-identity.md`: clear
+      `desktop_id` with the refusal rule and `CHECK`, optional keyless-insert
+      refusal once adoption criteria hold, then drop the `desktop_id` unique
+      constraints, retire `portable_cloud_identity_pending`, run the
+      orphan-media audit. Needs a new staged plan; production schema change.
+- [ ] **Private media cutover (Stage 2c).** `docs/security/stage-2-media-authorization.md`:
+      provision the private bucket, backfill, switch `MEDIA_STORAGE_MODE` off
+      `legacy`, detach `media.sporely.no`. First confirm no client still reads
+      the raw `url`. Security-sensitive; production.
+- [ ] **Shared-reference widening (eligibility Stage 3).**
+      `docs/plans/active/2026-09-30-reference-share-eligibility.md`. Needs an
+      owner decision and security review.
+- [ ] **Unused owner reference-sharing RPCs.** `list_my_reference_sharing`,
+      `stop_sharing_reference_set`, `share_reference_set_again` lost their web
+      caller in PR #28. Decide whether to keep them for desktop or drop them.
+- [ ] **Sync contract copies have drifted.** `docs/supabase-sync-contract.md`
+      here and `sporely/docs/supabase-sync-contract.md` in sporely-py are meant
+      to be identical but differ substantially. Reconcile them, then move the
+      historical "Repair plan" and incident sections out of the contract.
+- [ ] **Recorded production verification.** Several runbooks
+      (`docs/deployments/`, `docs/reference-statistics-activation.md`) have
+      their migrations applied, but no record of the post-checks or of the
+      brake Worker deploy. Record what was run, or run the read-only checks.
 
 ## Android release optimization
+
+Tracked as a staged plan in `docs/plans/active/2026-10-03-android-r8-obfuscation.md`
+(not started; `minifyEnabled false` in `android/app/build.gradle`). The notes
+below are the earlier backlog version and its verification list.
 
 Decision needed: is APK/AAB size currently important enough to justify a
 dedicated R8 test release? If yes, enable code and resource shrinking in the
@@ -174,7 +217,7 @@ Definition of done:
 
 ### Android Sporely Cam storage lifecycle
 
-- [ ] Device QA for `feature/native-camera-originals-lifecycle` (setting
+- [ ] Device QA for the merged storage lifecycle (v0.7.9: setting
       "Save originals to phone", post-enqueue cache cleanup, 48 h orphan prune).
       Checklist and design: `docs/native-camera-storage-lifecycle.md`.
 - [ ] Decide whether the untracked paths listed in that doc (import-group
@@ -403,8 +446,5 @@ work may still be referenced here when `sporely-web` owns that contract.
 ## References
 
 - `HISTORY.md` — debugging history, completed fixes, gotchas, and old implementation notes.
-- `docs/image-pipeline-phase1.md` — current image pipeline notes and Phase 1 findings.
-- Suggested future docs:
-  - `docs/project-status.md`
-  - `docs/manual-qa.md`
-  - `docs/agent-audit-checklist.md`
+- `docs/plans/completed/image-pipeline-phase1.md` — image pipeline notes and Phase 1 findings.
+- `docs/manual-qa.md` — outstanding device QA.

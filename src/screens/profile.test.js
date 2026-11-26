@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { blockedUserRowHtmlForTests, forceCloseProfileOverlay, openProfileOverlay } from './profile.js'
+import { blockedUserRowHtmlForTests, forceCloseProfileOverlay, friendRowsHtmlForTests, openProfileOverlay } from './profile.js'
 import * as profileScreen from './profile.js'
 import { AUTH_STATE, _resetAuthStateForTests, setAuthState } from '../auth-state.js'
 import { showProfileOverlay } from '../profile-overlay.js'
@@ -18,6 +18,51 @@ test('blocked-user fallback avatar escapes a display-name-derived initial', () =
   assert.match(html, /<div class="friend-avatar">&lt;<\/div>/)
   assert.doesNotMatch(html, /<div class="friend-avatar"><script>/)
   assert.match(html, /<div class="friend-email">&lt;script&gt;alert\(1\)&lt;\/script&gt;<\/div>/)
+})
+
+test('a friend whose profile is not public keeps a row and a Remove button', () => {
+  // public_profiles omits banned, blocked and unfinished accounts. The
+  // friendship still exists, so the user must be able to see and remove it.
+  const html = friendRowsHtmlForTests(
+    ['friend-visible', 'friend-hidden'],
+    [{ id: 'friend-visible', username: 'kari', display_name: 'Kari' }],
+  )
+
+  assert.equal((html.match(/class="friend-row"/g) || []).length, 2)
+  assert.match(html, /<div class="friend-email">@kari<\/div>\s*<button class="friend-remove-btn" data-id="friend-visible">/)
+  assert.match(html, /<div class="friend-email">[^<@]+<\/div>\s*<button class="friend-remove-btn" data-id="friend-hidden">/)
+})
+
+test('unnamed friends and blocks can be told apart, and a person gets one friend row', () => {
+  const idA = 'aaaaaaaa-0000-4000-8000-000000000001'
+  const idB = 'bbbbbbbb-0000-4000-8000-000000000002'
+  const labels = html => [...html.matchAll(/<div class="friend-email">([^<]*)<\/div>/g)].map(m => m[1])
+
+  // idA appears twice: crossed friend requests leave two accepted rows.
+  const friendLabels = labels(friendRowsHtmlForTests([idA, idB, idA], []))
+  assert.equal(friendLabels.length, 2)
+  assert.notEqual(friendLabels[0], friendLabels[1])
+  assert.match(friendLabels[0], /aaaaaaaa$/)
+  assert.match(friendLabels[1], /bbbbbbbb$/)
+
+  const blockLabels = [idA, idB].map(id => labels(blockedUserRowHtmlForTests({
+    blocked_id: id, username: null, display_name: null, avatar_url: null,
+  }))[0])
+  assert.notEqual(blockLabels[0], blockLabels[1])
+  assert.match(blockLabels[0], /aaaaaaaa$/)
+})
+
+test('friend rows escape profile names and ids', () => {
+  const html = friendRowsHtmlForTests(
+    ['id"><b>'],
+    [{ id: 'id"><b>', username: null, display_name: '<script>alert(1)</script>' }],
+  )
+
+  // Nothing from the profile or the id may arrive as markup.
+  assert.equal(html.includes('<script'), false)
+  assert.equal(html.includes('<b>'), false)
+  assert.match(html, /<div class="friend-avatar">&lt;<\/div>/)
+  assert.match(html, /data-id="id&quot;&gt;&lt;b&gt;"/)
 })
 
 test('force-closing an already hidden profile cannot hide the next setup overlay', () => {

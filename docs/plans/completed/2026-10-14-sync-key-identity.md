@@ -1,5 +1,7 @@
 # Per-record sync keys — retire the shared `desktop_id` identity
 
+> **Closed 2026-11-22:** Stages 1–8b done and merged. Web Stage 8 (`46c9297`) and the Stage 8b fix (`a6abde7`) are merged (PRs #34, #35); `docs/verification/2026-10-sync-key-w2b-web.md` records the passing Stage 8b run. Migrations `20261013210000`, `20261014120000`, `20261015090000` (brake) and `20261020100100` are applied in production. Whether the brake Worker was deployed is not recorded in this repo. The section "Deferred: cutover and keyless refusal" was never planned in detail and is tracked in `PLAN.md`. Production state verified read-only with `supabase migration list` on 2026-11-22.
+
 Status: revised 2026-10-14 after the user's scope decisions; amended 2026-10-15 (old-desktop compatibility, see "Decisions recorded 2026-10-15") and 2026-10-16 (F1, see "Decisions recorded 2026-10-16"). Stages 1–8 accepted (desktop at `3850b3f`, web at `46c9297`); Stage 8b (slice W3, verification only) remains. Approving this plan authorizes the remaining slice W3 and its candidate pushes to the designated branch. It authorizes no merge to `main`, no production operation and no gate result in any other run.
 Date: 2026-10-14
 Scope: the permanent fix for the multi-desktop `desktop_id` collision, implemented and tested together with the photo-location feature as one integrated desktop release. In scope: the web identity contract and a write stop for faulty desktop builds; the desktop sync change; web/Android key creation. Deferred: the database cutover and the refusal of keyless inserts. Repositories: sporely-web and sporely-py.
@@ -42,7 +44,7 @@ Accepted work, built on and not redone:
 Not owned by this plan:
 
 - **Brake deployment.** By the user's decision of 2026-10-15 the reviewed obsolete-desktop brake (sporely-web `fix/obsolete-desktop-sync-brake`, code at `48dc63e`, runbook at the branch head) becomes part of this release: Stage 1b re-issues it on the web identity branch, and "Release" deploys it before any keyed row can exist. Its production deployment still needs the user's explicit approval. The brake branch itself is not merged to `main`.
-- **The photo-location plan** (`docs/plans/active/2026-10-12-ingestion-location-provenance.md`). Its run stays paused with the desktop check (G4) failed. This plan supplies the accepted integrated desktop commit and the re-test evidence.
+- **The photo-location plan** (`docs/plans/completed/2026-10-12-ingestion-location-provenance.md`). Its run stays paused with the desktop check (G4) failed. This plan supplies the accepted integrated desktop commit and the re-test evidence.
 - **Later work, planned closer to release** when actual adoption is known (see "Deferred"):
   - the database cutover and the refusal of keyless inserts;
   - cleanup: dropping the `desktop_id` unique constraints, retiring `portable_cloud_identity_pending`, the orphan-media audit.

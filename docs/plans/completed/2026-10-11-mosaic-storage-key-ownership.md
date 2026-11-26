@@ -172,7 +172,7 @@ to read it:
 
 ## Stage 1 — Write/read guards, regression tests, security review
 
-First read the sections above the stages in `docs/plans/active/2026-10-11-mosaic-storage-key-ownership.md`. Their decisions and constraints apply to this stage.
+First read the sections above the stages in `docs/plans/completed/2026-10-11-mosaic-storage-key-ownership.md`. Their decisions and constraints apply to this stage.
 
 Scope (all in `sporely-web`):
 1. **Migration.** Add
@@ -254,7 +254,7 @@ SECURITY DEFINER triggers, media authorization and storage privacy.
 
 ## Stage 2 — Production migration runbook (human-executed)
 
-First read the sections above the stages in `docs/plans/active/2026-10-11-mosaic-storage-key-ownership.md`. Their decisions and constraints apply to this stage.
+First read the sections above the stages in `docs/plans/completed/2026-10-11-mosaic-storage-key-ownership.md`. Their decisions and constraints apply to this stage.
 
 The agent writes
 `docs/deployments/2026-10-11-mosaic-storage-key-ownership-runbook.md`. It

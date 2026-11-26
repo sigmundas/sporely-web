@@ -106,14 +106,15 @@ BEGIN
     (owner_user_id,  'authenticated', 'authenticated', 'spore-summary-owner@example.test',  '{}'::jsonb, now(), now()),
     (banned_user_id, 'authenticated', 'authenticated', 'spore-summary-banned@example.test', '{}'::jsonb, now(), now());
 
-  INSERT INTO public.profiles (id, username, display_name, is_banned)
+  INSERT INTO public.profiles (id, username, display_name, is_banned, profile_completed_at)
   VALUES
-    (owner_user_id,  'sspec_owner',  'Spore Summary Owner',  false),
-    (banned_user_id, 'sspec_banned', 'Spore Summary Banned', true)
+    (owner_user_id,  'sspec_owner',  'Spore Summary Owner',  false, now()),
+    (banned_user_id, 'sspec_banned', 'Spore Summary Banned', true,  now())
   ON CONFLICT (id) DO UPDATE
   SET username = EXCLUDED.username,
       display_name = EXCLUDED.display_name,
-      is_banned = EXCLUDED.is_banned;
+      is_banned = EXCLUDED.is_banned,
+      profile_completed_at = EXCLUDED.profile_completed_at;
 
   -- ── observations ────────────────────────────────────────────────────
   --

@@ -1,12 +1,17 @@
 # Runbook — ingestion and location provenance: G5 staging matrix and production rollout
 
-Plan: `docs/plans/active/2026-10-12-ingestion-location-provenance.md` (Stage 5).
+Plan: `docs/plans/completed/2026-10-12-ingestion-location-provenance.md` (Stage 5).
 Migration: `supabase/migrations/20261012105630_ingestion_location_provenance.sql`.
 Probe: `supabase/ingestion-location-provenance-probe.sql`.
 Contract: `docs/supabase-sync-contract.md`, "Private ingestion and location
 provenance (not deployed)".
 
-**Status: not executed. No production operation is authorized.** Part 1 is
+> **2026-11-22:** migration `20261012105630` is applied in production
+> (verified read-only with `supabase migration list` on 2026-11-22) and the client shipped via
+> PR #33. This repo has no record of the G5 staging-matrix result. The text
+> below is the runbook as prepared.
+
+**Status (as prepared): not executed. No production operation is authorized.** Part 1 is
 the manual completion gate G5, run by the user on a disposable target. Part 2
 is the separate production procedure. It needs a recorded G5 pass and a fresh,
 specific owner authorization, and each client publication needs its own.

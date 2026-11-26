@@ -8,28 +8,33 @@
 // STAGE ORDER (children before parents; R2 objects before DB rows; auth
 // user last):
 //
-//   0. check_r2_configuration    — list '<uid>/' once through ctx.r2 and
+//   0. sweep_preflight           — ask the worker's sweep route before
+//                                   anything is deleted; it must answer
+//                                   409 profile_exists (or sweep, on a
+//                                   retry). Stops a deletion that could
+//                                   not finish its last media step.
+//   1. check_r2_configuration    — list '<uid>/' once through ctx.r2 and
 //                                   probe delete permission (deleting a key
 //                                   that does not exist). A missing or
 //                                   misconfigured R2 client fails here, before
 //                                   the sign-out and the write fence.
-//   1. sign_out_everywhere       — admin.auth.admin.signOut(token, 'global').
-//   2. begin_account_deletion    — rpc begin_account_deletion: write the
+//   2. sign_out_everywhere       — admin.auth.admin.signOut(token, 'global').
+//   3. begin_account_deletion    — rpc begin_account_deletion: write the
 //                                   account-deletion marker (write fence).
-//   3. media_snapshot            — record R2 media keys BEFORE any DB row
+//   4. media_snapshot            — record R2 media keys BEFORE any DB row
 //                                   is deleted. Reads BOTH
 //                                   observation_images.storage_path (which
 //                                   has a paired thumb_ variant by contract)
 //                                   AND observation_images.original_storage_path
 //                                   (owner-only original, standalone — NO
 //                                   thumb companion manufactured).
-//   4. mosaic_media_snapshot     — record spore_measurement_mosaics.storage_key
+//   5. mosaic_media_snapshot     — record spore_measurement_mosaics.storage_key
 //                                   R2 keys BEFORE their DB rows are deleted.
 //                                   Mosaics have no separate thumb variant.
-//   5. calibration_media_snapshot — record calibrations.image_storage_path
+//   6. calibration_media_snapshot — record calibrations.image_storage_path
 //                                   R2 keys BEFORE the rows are deleted.
 //                                   The snapshots are keyset-paged.
-//   6. delete_r2_prefix          — list and delete EVERY object under
+//   7. delete_r2_prefix          — list and delete EVERY object under
 //                                   '<uid>/' in every configured R2 bucket
 //                                   (legacy public and private) through the
 //                                   S3-compatible API (ctx.r2). Since the
@@ -39,57 +44,62 @@
 //                                   covers released images (NULL paths), late
 //                                   Worker writes and every variant without
 //                                   guessing.
-//   7. delete_r2_media           — delete each snapshotted R2 media object
+//   8. delete_r2_media           — delete each snapshotted R2 media object
 //                                   (observation, mosaic and calibration
 //                                   keys), at most R2_DELETE_CONCURRENCY at
 //                                   once. 404 = success. The upload worker
 //                                   attempts both the legacy public bucket
 //                                   AND the private bucket for each key.
-//   8. delete_legacy_storage     — legacy Supabase Storage folders
+//   9. delete_legacy_storage     — legacy Supabase Storage folders
 //                                   (observation-images/${uid}, avatars/${uid}).
-//   9. scrub_mentions            — remove ONLY the deleted uid from
+//  10. scrub_mentions            — remove ONLY the deleted uid from
 //                                   comments.mentioned_user_ids of OTHER
 //                                   users' comments. Uses an SQL-safe RPC
 //                                   so co-mentioned uuids in the same row
 //                                   are preserved.
-//  10. delete_client_activity    — client_activity_daily.
-//  11. delete_follows            — follows.user_id + follows.target_id (only
+//  11. delete_client_activity    — client_activity_daily.
+//  12. delete_follows            — follows.user_id + follows.target_id (only
 //                                   when target_type='user' — target_id is
 //                                   polymorphic text).
-//  12. delete_reports            — reports.reporter_id + reported_user_id.
-//  13. delete_identifications    — observation_identifications.user_id.
-//  14. delete_spore_summaries    — observation_spore_summaries.user_id.
-//  15. delete_mosaics            — spore_measurement_mosaics.user_id
-//                                   (R2 objects already gone at steps 6-7).
-//  16. delete_user_blocks        — blocker_id + blocked_id.
-//  17. delete_friendships        — requester_id + addressee_id.
-//  18. delete_observation_shares — owner_id + shared_with_id.
-//  19. delete_comments           — comments.user_id.
-//  20. delete_spore_annotations  — spore_annotations.user_id.
-//  21. delete_spore_measurements — spore_measurements.user_id.
-//  22. delete_reference_library_for_account — atomically mark reference
+//  13. delete_reports            — reports.reporter_id + reported_user_id.
+//  14. delete_identifications    — observation_identifications.user_id.
+//  15. delete_spore_summaries    — observation_spore_summaries.user_id.
+//  16. delete_mosaics            — spore_measurement_mosaics.user_id
+//                                   (R2 objects already gone at steps 7-8).
+//  17. delete_user_blocks        — blocker_id + blocked_id.
+//  18. delete_friendships        — requester_id + addressee_id.
+//  19. delete_observation_shares — owner_id + shared_with_id.
+//  20. delete_comments           — comments.user_id.
+//  21. delete_spore_annotations  — spore_annotations.user_id.
+//  22. delete_spore_measurements — spore_measurements.user_id.
+//  23. delete_reference_library_for_account — atomically mark reference
 //                                   mutations closed and delete the owner's
 //                                   normalized reference graph through the
 //                                   service-role-only RPC of the same name.
-//  23. delete_observation_images — observation_images.user_id
-//                                   (R2 objects already gone at steps 6-7).
-//  24. delete_observations       — observations.user_id.
-//  25. delete_calibrations       — calibrations.user_id.
-//  26. delete_r2_prefix_second_pass — the prefix delete again, catching
+//  24. delete_observation_images — observation_images.user_id
+//                                   (R2 objects already gone at steps 7-8).
+//  25. delete_observations       — observations.user_id.
+//  26. delete_calibrations       — calibrations.user_id.
+//  27. delete_r2_prefix_second_pass — the prefix delete again, catching
 //                                   uploads that raced the first pass.
-//  27. verify_r2_prefix_empty    — list '<uid>/' in every bucket; anything
+//  28. verify_r2_prefix_empty    — list '<uid>/' in every bucket; anything
 //                                   left fails the run before the account
 //                                   is deleted, so the user can retry.
-//  28. erase_media_retirements   — public.erase_account_media_retirements:
+//  29. erase_media_retirements   — public.erase_account_media_retirements:
 //                                   remove the user's media-key registry rows
 //                                   (allowed only once the account-deletion
 //                                   marker exists and no content rows remain).
 //                                   If a content row is still there (a write
-//                                   that passed the guard just before step 2
+//                                   that passed the guard just before step 3
 //                                   committed), the run waits briefly and
-//                                   repeats steps 3-28 once.
-//  29. delete_profile            — profiles.id.
-//  30. delete_auth_user          — admin.auth.admin.deleteUser(uid). LAST so
+//                                   repeats steps 4-29 once.
+//  30. delete_profile            — profiles.id.
+//  31. sweep_r2_prefix           — the worker deletes every object left
+//                                   under `<uid>/` in every bucket. Runs
+//                                   only once the profile is gone (the
+//                                   worker checks), after which uploads
+//                                   are refused.
+//  32. delete_auth_user          — admin.auth.admin.deleteUser(uid). LAST so
 //                                   a failure in any earlier stage leaves
 //                                   the auth session intact for retry.
 //
@@ -105,7 +115,10 @@
  * @typedef {{
  *   uid: string,
  *   admin: any,
- *   worker: { deleteKey: (key: string) => Promise<MediaWorkerResult> },
+ *   worker: {
+ *     deleteKey: (key: string) => Promise<MediaWorkerResult>,
+ *     sweepAccountMedia: () => Promise<MediaWorkerResult & { deleted?: number, done?: boolean }>,
+ *   },
  *   r2Keys: Set<string>,
  *   signOutEverywhere?: () => Promise<{ error?: { message: string } | null }>,
  *   r2?: {
@@ -162,6 +175,11 @@ export const ACCOUNT_NOT_ERASABLE_HINT = 'sporely_account_not_erasable'
 export const CONTENT_RERUN_FROM = 'media_snapshot'
 export const CONTENT_RERUN_DELAY_MS = 2000
 
+// Worker sweep calls in sweep_r2_prefix. Each call deletes up to 5,000
+// objects, so this covers far more than any account holds; an account
+// beyond it fails the stage and the user's retry continues the sweep.
+export const SWEEP_MAX_CALLS = 40
+
 /**
  * Calls `fn` for every item with at most `limit` calls in flight. Resolves
  * once every call has settled; `fn` must not throw.
@@ -204,6 +222,29 @@ function lastRowId(label, rows) {
 
 /** @type {readonly Stage[]} */
 export const STAGES = Object.freeze([
+  {
+    // Nothing is deleted unless the worker can finish the job: a worker
+    // without the sweep route (404), without its profile lookup (503), or
+    // unreachable would otherwise fail sweep_r2_prefix only after the
+    // profile is gone, leaving an account that can neither upload nor
+    // finish setup. A live account gets 409 profile_exists; a retry after
+    // delete_profile gets a real (harmless) sweep.
+    name: 'sweep_preflight',
+    apply: async ctx => {
+      let outcome
+      try {
+        outcome = await ctx.worker.sweepAccountMedia()
+      } catch (err) {
+        outcome = { ok: false, detail: err?.message }
+      }
+      if (outcome?.ok) return { ok: true }
+      if (outcome?.status === 409 && outcome?.detail === 'profile_exists') return { ok: true }
+      return {
+        ok: false,
+        error: `media sweep not ready: ${outcome?.detail || outcome?.status || 'unknown'}`,
+      }
+    },
+  },
   {
     // Before anything changes: the prefix erasure needs a configured R2
     // client with list access. A failure here leaves the account untouched
@@ -578,6 +619,37 @@ export const STAGES = Object.freeze([
       } catch (err) {
         return { ok: false, error: err.message }
       }
+    },
+  },
+  {
+    // Deletes every R2 object left under the user's own key prefix: legacy
+    // uploads that never had an image row, uploads that landed after
+    // media_snapshot, abandoned temp keys. The worker runs this only once
+    // the profile row is gone, and refuses uploads without one, so nothing
+    // can land behind it. Each call is bounded; repeat until `done`.
+    name: 'sweep_r2_prefix',
+    apply: async ctx => {
+      let deleted = 0
+      for (let calls = 0; calls < SWEEP_MAX_CALLS; calls++) {
+        let outcome
+        try {
+          outcome = await ctx.worker.sweepAccountMedia()
+        } catch (err) {
+          outcome = { ok: false, detail: err?.message }
+        }
+        if (!outcome?.ok) {
+          return {
+            ok: false,
+            error: `r2 prefix sweep failed: ${outcome?.detail || outcome?.status || 'unknown'}`,
+          }
+        }
+        deleted += Number(outcome.deleted || 0)
+        if (outcome.done) {
+          if (deleted) console.info('[delete-account] prefix sweep removed unlisted objects', { count: deleted })
+          return { ok: true }
+        }
+      }
+      return { ok: false, error: 'r2 prefix sweep did not finish; retry the deletion' }
     },
   },
   {

@@ -1,10 +1,15 @@
 # Stage 2 — Private Media Storage and Authorized Delivery
 
-**Status:** Stage 2a database + Worker deployed with `MEDIA_STORAGE_MODE=legacy`; Stage 2b additive API projection in review
+**Status (2026-11-22):** Stage 2a and Stage 2b migrations are applied in production
+(verified read-only with `supabase migration list` on 2026-11-22). The Worker still runs
+`MEDIA_STORAGE_MODE = "legacy"` and the `PRIVATE_MEDIA_BUCKET` binding is commented
+out (`cloudflare/r2-upload-worker/wrangler.toml`). Stage 2c (private bucket,
+backfill, detaching `media.sporely.no`) has not started, so private media stays
+fetchable by bare URL; see the November 2026 security findings in `INBOX.md`.
 **Migrations:**
 - `20260803120000_lock_down_observation_sync_tables.sql` (Stage 1)
 - `20260804120000_media_authorization.sql` (consolidated Stage 2a)
-- `20260809120000_stage2b_authorized_media_projections.sql` (additive Stage 2b API layer; not yet applied)
+- `20260809120000_stage2b_authorized_media_projections.sql` (additive Stage 2b API layer; applied)
 
 ## 1. Threat model
 

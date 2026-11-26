@@ -83,9 +83,11 @@ BEGIN
   INSERT INTO auth.users(id,aud,role,email,raw_user_meta_data,created_at,updated_at) VALUES
     (user_1,'authenticated','authenticated','shared-one@example.invalid','{}',now(),now()),
     (user_2,'authenticated','authenticated','shared-two@example.invalid','{}',now(),now());
-  INSERT INTO public.profiles(id,username,display_name,is_banned) VALUES
-    (user_1,'shared_one','User 1',false),
-    (user_2,'shared_two','User 2',false);
+  -- Established accounts: an unfinished profile is labelled 'Sporely user'
+  -- (20261125210000; covered by unfinished_profile_privacy_test.sql).
+  INSERT INTO public.profiles(id,username,display_name,is_banned,profile_completed_at) VALUES
+    (user_1,'shared_one','User 1',false,now()),
+    (user_2,'shared_two','User 2',false,now());
   INSERT INTO taxonomy_v3.registry_concept(
     sporely_taxon_id,canonical_name,rank,scope_state,cache_state,
     first_materialized_from_release

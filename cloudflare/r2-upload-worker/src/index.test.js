@@ -1710,6 +1710,87 @@ test('Stage2a-r3: overwrite in private mode PRESERVES prior bytes when canonical
     } finally { globalThis.fetch = originalFetch }
   })
 
+function installLegacyOverwriteFetchMock({ failTally = false } = {}) {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async input => {
+    const url = typeof input === 'string' ? input : String(input?.url || '')
+    if (url.includes('/rest/v1/profiles?')) {
+      return new Response(JSON.stringify([{
+        is_pro: true, cloud_plan: 'pro', storage_quota_bytes: null,
+        total_storage_bytes: 0, storage_used_bytes: 0, image_count: 0, is_banned: false,
+      }]), { status: 200 })
+    }
+    if (url.includes('/rest/v1/rpc/apply_profile_storage_delta')) {
+      if (failTally) return new Response('tally error', { status: 500 })
+      return new Response(JSON.stringify([{
+        total_storage_bytes: 100, storage_used_bytes: 100, image_count: 1,
+      }]), { status: 200 })
+    }
+    throw new Error(`Unexpected fetch: ${url}`)
+  }
+  return () => { globalThis.fetch = originalFetch }
+}
+
+function legacyOverwriteRequest(token, body) {
+  return new Request('https://upload.sporely.no/upload/user-123/existing.webp', {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'image/webp',
+      'Content-Length': String(body.length),
+      'X-Sporely-Upload-Variant': 'full',
+    },
+    body: new TextEncoder().encode(body),
+  })
+}
+
+test('overwrite in legacy mode PRESERVES prior bytes when the storage tally fails', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const legacy = makeMockBucketStage2({
+    'user-123/existing.webp': { body: new TextEncoder().encode('PRIOR_BYTES_INTACT') },
+  })
+  const restore = installLegacyOverwriteFetchMock({ failTally: true })
+  try {
+    const res = await worker.fetch(
+      legacyOverwriteRequest(token, 'LONGER_NEW_BYTES_THAN_BEFORE'),
+      legacyUploadEnv(jwtSecret, legacy),
+      {},
+    )
+    assert.equal(res.status, 500)
+    assert.equal(legacy._has('user-123/existing.webp'), true,
+      'a failed legacy overwrite must not delete the previous object')
+    const final = await legacy.get('user-123/existing.webp')
+    assert.equal(new TextDecoder().decode(await final.body), 'PRIOR_BYTES_INTACT')
+    const putKeys = legacy.events.filter(event => event.op === 'put').map(event => event.key)
+    assert.equal(putKeys.length, 1)
+    assert.match(putKeys[0], /^user-123\/existing\.webp\.pending-[0-9a-f]{32}$/)
+    assert.equal(legacy._has(putKeys[0]), false, 'the temp key must be removed')
+  } finally { restore() }
+})
+
+test('overwrite in legacy mode PROMOTES temp→final on success', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const legacy = makeMockBucketStage2({
+    'user-123/existing.webp': { body: new TextEncoder().encode('PRIOR') },
+  })
+  const restore = installLegacyOverwriteFetchMock()
+  try {
+    const res = await worker.fetch(
+      legacyOverwriteRequest(token, 'NEW'),
+      legacyUploadEnv(jwtSecret, legacy),
+      {},
+    )
+    assert.equal(res.status, 201)
+    const final = await legacy.get('user-123/existing.webp')
+    assert.equal(new TextDecoder().decode(await final.body), 'NEW')
+    const tempKeys = legacy.events
+      .filter(event => event.op === 'put' && event.key.includes('.pending-'))
+      .map(event => event.key)
+    assert.equal(tempKeys.length, 1)
+    assert.equal(legacy._has(tempKeys[0]), false, 'the temp key must be removed')
+  } finally { restore() }
+})
+
 // ── DELETE /upload/<key> attempts both legacy + private buckets ───────
 
 function makeTrackedBucket(entries = {}) {
@@ -2710,15 +2791,13 @@ const PRO_PROFILE = {
   total_storage_bytes: 0, storage_used_bytes: 0, image_count: 0, is_banned: false,
 }
 
-test('normalizeUploadContentType refuses SVG, XML and malformed types', () => {
+test('normalizeUploadContentType refuses missing, octet-stream, SVG, XML and malformed types', () => {
   assert.equal(normalizeUploadContentType('image/webp'), 'image/webp')
   assert.equal(normalizeUploadContentType('IMAGE/JPEG; charset=binary'), 'image/jpeg')
   assert.equal(normalizeUploadContentType('image/tiff'), 'image/tiff')
   assert.equal(normalizeUploadContentType('image/heic'), 'image/heic')
-  assert.equal(normalizeUploadContentType(''), 'application/octet-stream')
-  assert.equal(normalizeUploadContentType(null), 'application/octet-stream')
-  assert.equal(normalizeUploadContentType('application/octet-stream'), 'application/octet-stream')
   for (const refused of [
+    '', null, undefined, 'application/octet-stream', 'Application/Octet-Stream; x=1',
     'image/svg+xml', 'image/SVG+XML; charset=utf-8', 'image/svg', 'image/x-svg',
     'image/vnd.xml', 'text/html', 'image/png, text/html', 'image/', 'image',
     'application/xml', 'image/png text/html',
@@ -2732,7 +2811,7 @@ test('uploads with an SVG content type are refused before any write', async () =
   const restoreFetch = installProfileFetchMock(PRO_PROFILE)
   let puts = 0
   try {
-    for (const contentType of ['image/svg+xml', 'image/svg+xml; charset=utf-8', 'text/html']) {
+    for (const contentType of ['image/svg+xml', 'image/svg+xml; charset=utf-8', 'text/html', 'application/octet-stream']) {
       const response = await worker.fetch(
         buildUploadRequest({
           token, bodyBytes: 200, uploadMode: 'full', uploadVariant: 'full',
@@ -2817,4 +2896,411 @@ test('legacy uploads store the Worker Cache-Control, not the client value', asyn
       cacheControl: 'public, max-age=31536000, immutable',
     }])
   } finally { restoreFetch() }
+})
+
+// ── Account deletion: profileless uploads and the prefix sweep ────────
+
+test('uploads from an account without a profile row are refused before any write', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock(null)
+  let puts = 0
+  try {
+    const response = await worker.fetch(
+      buildUploadRequest({
+        token, bodyBytes: 200, uploadMode: 'full', uploadVariant: 'full',
+        cloudPlan: 'free', qualityProfile: 'standard', sourceWidth: 100,
+        sourceHeight: 100, storedWidth: 100, storedHeight: 100,
+      }),
+      legacyUploadEnv(jwtSecret, { head: async () => null, put: async () => { puts += 1; return {} } }),
+      {},
+    )
+    const payload = await response.json()
+    assert.equal(response.status, 403)
+    assert.equal(payload.error, 'profile_missing')
+    assert.equal(puts, 0)
+  } finally { restoreFetch() }
+})
+
+test('an upload whose profile is deleted mid-request is rolled back', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async input => {
+    const url = typeof input === 'string' ? input : String(input?.url || '')
+    if (url.includes('/rest/v1/profiles?')) {
+      return new Response(JSON.stringify([PRO_PROFILE]), { status: 200 })
+    }
+    if (url.includes('/rest/v1/rpc/apply_profile_storage_delta')) {
+      // The profile row was deleted between the check and the tally.
+      return new Response('[]', { status: 200 })
+    }
+    throw new Error(`Unexpected fetch: ${url}`)
+  }
+  const bucket = makeMockBucketStage2()
+  try {
+    const response = await worker.fetch(
+      buildUploadRequest({
+        token, bodyBytes: 200, uploadMode: 'full', uploadVariant: 'full',
+        cloudPlan: 'pro', qualityProfile: 'high', sourceWidth: 100,
+        sourceHeight: 100, storedWidth: 100, storedHeight: 100,
+      }),
+      legacyUploadEnv(jwtSecret, bucket),
+      {},
+    )
+    assert.equal(response.status, 403)
+    assert.equal((await response.json()).error, 'profile_missing')
+    assert.equal(bucket._has('user-123/obs-123/0_000000.webp'), false)
+  } finally { globalThis.fetch = originalFetch }
+})
+
+function makeListableBucket(keys = []) {
+  const objects = new Set(keys)
+  const events = []
+  return {
+    events,
+    async head(key) { return objects.has(key) ? { size: 1 } : null },
+    async list({ prefix = '', limit = 1000 } = {}) {
+      events.push({ op: 'list', prefix })
+      const matching = [...objects].filter(key => key.startsWith(prefix)).sort()
+      return {
+        objects: matching.slice(0, limit).map(key => ({ key })),
+        truncated: matching.length > limit,
+      }
+    },
+    async delete(keyOrKeys) {
+      const list = Array.isArray(keyOrKeys) ? keyOrKeys : [keyOrKeys]
+      events.push({ op: 'delete', keys: list })
+      for (const key of list) objects.delete(key)
+    },
+    _keys() { return [...objects].sort() },
+  }
+}
+
+function sweepRequest(token) {
+  return new Request('https://upload.sporely.no/account/media-sweep', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+function sweepEnv(jwtSecret, buckets) {
+  return {
+    ...TEST_ENV,
+    MEDIA_STORAGE_MODE: 'legacy',
+    SUPABASE_URL: 'https://example.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+    SUPABASE_JWT_SECRET: jwtSecret,
+    ...buckets,
+  }
+}
+
+test('media sweep deletes only the caller prefix in every bucket once the profile is gone', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock(null)
+  const legacy = makeListableBucket([
+    'user-123/obs/0_a.webp', 'user-123/obs/thumb_0_a.webp', 'user-123/obs/x.webp.pending-abc',
+    'user-1234/obs/other.webp', 'other-user/user-123/obs.webp',
+  ])
+  const priv = makeListableBucket(['user-123/obs/1_b.webp', 'someone-else/obs/1.webp'])
+  try {
+    const response = await worker.fetch(
+      sweepRequest(token),
+      sweepEnv(jwtSecret, { MEDIA_BUCKET: legacy, PRIVATE_MEDIA_BUCKET: priv }),
+      {},
+    )
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), { ok: true, deleted: 4, done: true })
+    assert.deepEqual(legacy._keys(), ['other-user/user-123/obs.webp', 'user-1234/obs/other.webp'])
+    assert.deepEqual(priv._keys(), ['someone-else/obs/1.webp'])
+    for (const event of [...legacy.events, ...priv.events].filter(e => e.op === 'list')) {
+      assert.equal(event.prefix, 'user-123/')
+    }
+  } finally { restoreFetch() }
+})
+
+test('media sweep is refused while the caller still has a profile', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock(PRO_PROFILE)
+  const legacy = makeListableBucket(['user-123/obs/0_a.webp'])
+  try {
+    const response = await worker.fetch(sweepRequest(token), sweepEnv(jwtSecret, { MEDIA_BUCKET: legacy }), {})
+    assert.equal(response.status, 409)
+    assert.equal((await response.json()).error, 'profile_exists')
+    assert.deepEqual(legacy._keys(), ['user-123/obs/0_a.webp'])
+    assert.deepEqual(legacy.events, [])
+  } finally { restoreFetch() }
+})
+
+test('media sweep is refused without a token or without the profile lookup', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const legacy = makeListableBucket(['user-123/obs/0_a.webp'])
+  const noToken = await worker.fetch(
+    new Request('https://upload.sporely.no/account/media-sweep', { method: 'POST' }),
+    sweepEnv(jwtSecret, { MEDIA_BUCKET: legacy }), {})
+  assert.equal(noToken.status, 401)
+  const env = sweepEnv(jwtSecret, { MEDIA_BUCKET: legacy })
+  delete env.SUPABASE_SERVICE_ROLE_KEY
+  const noServiceRole = await worker.fetch(sweepRequest(token), env, {})
+  assert.equal(noServiceRole.status, 503)
+  assert.deepEqual(legacy._keys(), ['user-123/obs/0_a.webp'])
+})
+
+test('media sweep stops at its page budget and reports not done', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock(null)
+  const keys = Array.from({ length: 5500 }, (_, i) => `user-123/obs/${String(i).padStart(5, '0')}.webp`)
+  const legacy = makeListableBucket(keys)
+  try {
+    const env = sweepEnv(jwtSecret, { MEDIA_BUCKET: legacy })
+    const first = await worker.fetch(sweepRequest(token), env, {})
+    assert.deepEqual(await first.json(), { ok: true, deleted: 5000, done: false })
+    const second = await worker.fetch(sweepRequest(token), env, {})
+    assert.deepEqual(await second.json(), { ok: true, deleted: 500, done: true })
+    assert.deepEqual(legacy._keys(), [])
+  } finally { restoreFetch() }
+})
+
+// ── Free-plan storage quota ───────────────────────────────────────────
+
+const FREE_QUOTA_BYTES = 2 * 1024 * 1024 * 1024
+
+test('wrangler.toml sets the 2 GiB free-plan storage quota', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const toml = await readFile(new URL('../wrangler.toml', import.meta.url), 'utf8')
+  assert.match(toml, new RegExp(`^FREE_STORAGE_QUOTA_BYTES = "${FREE_QUOTA_BYTES}"$`, 'm'))
+})
+
+for (const [label, usedBytes, expectedStatus] of [
+  ['under', FREE_QUOTA_BYTES - 10_000, 201],
+  ['over', FREE_QUOTA_BYTES - 100, 413],
+]) {
+  test(`a free account ${label} the configured quota gets ${expectedStatus}`, async () => {
+    const { jwtSecret, token } = createWorkerAuthToken()
+    const restoreFetch = installProfileFetchMock({
+      is_pro: false, cloud_plan: 'free', storage_quota_bytes: null,
+      total_storage_bytes: usedBytes, storage_used_bytes: usedBytes, image_count: 1, is_banned: false,
+    })
+    let puts = 0
+    try {
+      const response = await worker.fetch(
+        buildUploadRequest({
+          token, bodyBytes: 200, uploadMode: 'reduced', uploadVariant: 'full',
+          cloudPlan: 'free', qualityProfile: 'standard', sourceWidth: 100,
+          sourceHeight: 100, storedWidth: 100, storedHeight: 100,
+        }),
+        {
+          ...legacyUploadEnv(jwtSecret, { head: async () => null, put: async () => { puts += 1; return {} } }),
+          FREE_STORAGE_QUOTA_BYTES: String(FREE_QUOTA_BYTES),
+        },
+        {},
+      )
+      assert.equal(response.status, expectedStatus)
+      if (expectedStatus === 413) {
+        assert.equal((await response.json()).error, 'storage_quota_exceeded')
+        assert.equal(puts, 0)
+      }
+    } finally { restoreFetch() }
+  })
+}
+
+// ── Rate limits ───────────────────────────────────────────────────────
+
+function fakeLimiter({ success = true, throws = false } = {}) {
+  const keys = []
+  return {
+    keys,
+    async limit({ key }) {
+      keys.push(key)
+      if (throws) throw new Error('limiter down')
+      return { success }
+    },
+  }
+}
+
+test('wrangler.toml binds the agreed rate limits', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const toml = await readFile(new URL('../wrangler.toml', import.meta.url), 'utf8')
+  for (const [name, limit] of [
+    ['UPLOAD_RATE_LIMITER', 300], ['ARTSORAKEL_RATE_LIMITER', 60], ['LOCATION_RATE_LIMITER', 60],
+  ]) {
+    assert.match(toml, new RegExp(
+      `\\[\\[ratelimits\\]\\]\\nname = "${name}".*\\nnamespace_id = "\\d+"\\nsimple = \\{ limit = ${limit}, period = 60 \\}`))
+  }
+})
+
+test('uploads over the per-user rate limit get 429 before any read or write', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock(PRO_PROFILE)
+  const limiter = fakeLimiter({ success: false })
+  let bucketCalls = 0
+  try {
+    const response = await worker.fetch(
+      buildUploadRequest({
+        token, bodyBytes: 200, uploadMode: 'full', uploadVariant: 'full',
+        cloudPlan: 'pro', qualityProfile: 'high', sourceWidth: 100,
+        sourceHeight: 100, storedWidth: 100, storedHeight: 100,
+      }),
+      {
+        ...legacyUploadEnv(jwtSecret, {
+          head: async () => { bucketCalls += 1; return null },
+          put: async () => { bucketCalls += 1; return {} },
+        }),
+        UPLOAD_RATE_LIMITER: limiter,
+      },
+      {},
+    )
+    assert.equal(response.status, 429)
+    assert.equal((await response.json()).error, 'rate_limited')
+    assert.deepEqual(limiter.keys, ['upload:user-123'])
+    assert.equal(bucketCalls, 0)
+  } finally { restoreFetch() }
+})
+
+test('a failing rate limiter lets an upload through', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const restoreFetch = installProfileFetchMock(PRO_PROFILE)
+  try {
+    const response = await worker.fetch(
+      buildUploadRequest({
+        token, bodyBytes: 200, uploadMode: 'full', uploadVariant: 'full',
+        cloudPlan: 'pro', qualityProfile: 'high', sourceWidth: 100,
+        sourceHeight: 100, storedWidth: 100, storedHeight: 100,
+      }),
+      {
+        ...legacyUploadEnv(jwtSecret, { head: async () => null, put: async () => ({ etag: 'e' }) }),
+        UPLOAD_RATE_LIMITER: fakeLimiter({ throws: true }),
+      },
+      {},
+    )
+    assert.equal(response.status, 201)
+  } finally { restoreFetch() }
+})
+
+for (const path of ['/artsorakel', '/artsorakel/media']) {
+  test(`POST ${path} over the per-user rate limit gets 429 and never calls upstream`, async () => {
+    const { jwtSecret, token } = createWorkerAuthToken()
+    const upstream = installArtsorakelUpstreamMock(async () => {
+      throw new Error('upstream must not be called')
+    })
+    const limiter = fakeLimiter({ success: false })
+    try {
+      const response = await worker.fetch(
+        new Request(`https://upload.sporely.no${path}`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ keys: ['user-123/obs/0.webp'] }),
+        }),
+        {
+          ...TEST_ENV,
+          SUPABASE_URL: 'https://example.supabase.co',
+          SUPABASE_JWT_SECRET: jwtSecret,
+          ARTSORAKEL_API_TOKEN: 'test-secret-token',
+          ARTSORAKEL_RATE_LIMITER: limiter,
+        },
+        {},
+      )
+      assert.equal(response.status, 429)
+      assert.deepEqual(limiter.keys, ['artsorakel:user-123'])
+      assert.equal(upstream.calls.length, 0)
+    } finally { upstream.restore() }
+  })
+}
+
+test('GET /reverse-location over the per-IP rate limit gets 429 without an upstream call', async () => {
+  const originalFetch = globalThis.fetch
+  let upstreamCalls = 0
+  globalThis.fetch = async () => { upstreamCalls += 1; throw new Error('upstream must not be called') }
+  const limiter = fakeLimiter({ success: false })
+  try {
+    const response = await worker.fetch(
+      new Request('https://upload.sporely.no/reverse-location?lat=59.9&lon=10.7', {
+        headers: { 'CF-Connecting-IP': '203.0.113.7' },
+      }),
+      { ...TEST_ENV, LOCATION_RATE_LIMITER: limiter },
+      {},
+    )
+    assert.equal(response.status, 429)
+    assert.deepEqual(limiter.keys, ['location:203.0.113.7'])
+    assert.equal(upstreamCalls, 0)
+  } finally { globalThis.fetch = originalFetch }
+})
+
+// ── Review fixes: deletion fence and promotion compensation ──────────
+
+test('a same-size overwrite whose profile is deleted before the write finishes is removed', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const legacy = makeMockBucketStage2({
+    'user-123/existing.webp': { body: new TextEncoder().encode('OLD') },
+  })
+  const originalFetch = globalThis.fetch
+  let profileLookups = 0
+  let tallyCalls = 0
+  globalThis.fetch = async input => {
+    const url = typeof input === 'string' ? input : String(input?.url || '')
+    if (url.includes('/rest/v1/profiles?')) {
+      profileLookups += 1
+      // First lookup: the account is live. Later: deletion removed the profile.
+      return new Response(JSON.stringify(profileLookups === 1 ? [PRO_PROFILE] : []), { status: 200 })
+    }
+    if (url.includes('/rest/v1/rpc/apply_profile_storage_delta')) {
+      tallyCalls += 1
+      return new Response('[]', { status: 200 })
+    }
+    throw new Error(`Unexpected fetch: ${url}`)
+  }
+  try {
+    const res = await worker.fetch(legacyOverwriteRequest(token, 'NEW'), legacyUploadEnv(jwtSecret, legacy), {})
+    assert.equal(res.status, 403)
+    assert.equal((await res.json()).error, 'profile_missing')
+    assert.equal(tallyCalls, 0, 'a same-size overwrite skips the tally')
+    assert.equal(legacy._has('user-123/existing.webp'), false,
+      'the write must not survive behind the deletion sweep')
+    assert.deepEqual(
+      legacy.events.filter(e => e.op === 'put').map(e => e.key).filter(k => legacy._has(k)), [])
+  } finally { globalThis.fetch = originalFetch }
+})
+
+test('a failed promotion reverses the storage tally and keeps the previous bytes', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  const legacy = makeMockBucketStage2({
+    'user-123/existing.webp': { body: new TextEncoder().encode('PRIOR') },
+  })
+  const basePut = legacy.put.bind(legacy)
+  legacy.put = async (key, body, opts) => {
+    if (key === 'user-123/existing.webp') throw new Error('r2 put failed')
+    return basePut(key, body, opts)
+  }
+  const deltas = []
+  const restore = installProfileFetchMock(PRO_PROFILE, null, payload => deltas.push(payload.p_storage_delta))
+  try {
+    const res = await worker.fetch(
+      legacyOverwriteRequest(token, 'MUCH_LONGER_NEW_BYTES'),
+      legacyUploadEnv(jwtSecret, legacy),
+      {},
+    )
+    assert.equal(res.status, 500)
+    assert.equal((await res.json()).error, 'promotion_failed')
+    assert.equal(deltas.length, 2)
+    assert.equal(deltas[0] + deltas[1], 0, 'the tally must be reversed')
+    const final = await legacy.get('user-123/existing.webp')
+    assert.equal(new TextDecoder().decode(await final.body), 'PRIOR')
+  } finally { restore() }
+})
+
+test('uploads are refused when the worker has no service role for the profile lookup', async () => {
+  const { jwtSecret, token } = createWorkerAuthToken()
+  let puts = 0
+  const env = legacyUploadEnv(jwtSecret, { head: async () => null, put: async () => { puts += 1; return {} } })
+  delete env.SUPABASE_SERVICE_ROLE_KEY
+  const response = await worker.fetch(
+    buildUploadRequest({
+      token, bodyBytes: 200, uploadMode: 'full', uploadVariant: 'full',
+      cloudPlan: 'free', qualityProfile: 'standard', sourceWidth: 100,
+      sourceHeight: 100, storedWidth: 100, storedHeight: 100,
+    }),
+    env,
+    {},
+  )
+  assert.equal(response.status, 503)
+  assert.equal((await response.json()).error, 'upload_unavailable')
+  assert.equal(puts, 0)
 })

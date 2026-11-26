@@ -1,7 +1,7 @@
 {
   "name": "sporely-web",
   "private": true,
-  "version": "0.7.17",
+  "version": "0.7.19",
   "type": "module",
   "engines": {
     "node": ">=22.0.0"
@@ -54,14 +54,15 @@
     "taxonomy:v2:import": "node scripts/taxonomy-v2/import-release.mjs --local",
     "taxonomy:v2:measure": "node scripts/taxonomy-v2/measure-release.mjs",
     "taxonomy:v2:validate-full-load": "node scripts/taxonomy-v2/measure-release.mjs",
+    "taxonomy:v2:prepare-purge": "node scripts/taxonomy-v2/prepare-release-purge.mjs",
     "release:version:minor": "npm version minor --no-git-tag-version && npm run sync:version:bump-code",
     "release:version:major": "npm version major --no-git-tag-version && npm run sync:version:bump-code"
   },
   "dependencies": {
-    "@capacitor/android": "^8.3.0",
+    "@capacitor/android": "^8.6.2",
     "@capacitor/app": "^8.1.0",
-    "@capacitor/cli": "^8.3.0",
-    "@capacitor/core": "^8.3.0",
+    "@capacitor/cli": "^8.6.2",
+    "@capacitor/core": "^8.6.2",
     "@capacitor/filesystem": "^8.1.2",
     "@capacitor/network": "^8.0.1",
     "@capacitor/preferences": "^8.0.1",
@@ -80,6 +81,6 @@
     "@vitejs/plugin-basic-ssl": "^2.3.0",
     "eslint": "^10.4.1",
     "globals": "^17.6.0",
-    "vite": "^6.3.2"
+    "vite": "^6.4.6"
   }
 }

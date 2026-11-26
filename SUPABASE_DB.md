@@ -63,6 +63,7 @@ This repository owns the W2–W5 cloud and web implementation described there.
 - `get_blocked_user_profiles()` (RPC)
   - Returns `blocked_id`, `username`, `display_name`, `avatar_url`, block `created_at` for the caller's own `user_blocks` rows only (`blocker_id = auth.uid()`)
   - Exists because `public_profiles` / `read_public_profiles` hides blocked pairs, so a blocker could not otherwise resolve names in their own block list
+  - `username` and `display_name` are `NULL` for a blocked account that has not finished setup (`20261125210000`); the row is still returned so the block can be removed
   - `SECURITY DEFINER`, `search_path = 'public'`, granted to `authenticated` / `service_role` only (anon cannot execute). Accepted residual disclosure: shows current identity of blocked users even if banned or blocking back, so the user can recognize whom to unblock
   - Added by `20260824140000_get_blocked_user_profiles_rpc.sql`; consumed by the web Profile "Friends | Blocked users" pill (`src/screens/profile.js`)
 - `reports`
@@ -78,6 +79,12 @@ This repository owns the W2–W5 cloud and web implementation described there.
   - Clients can only read and update their own row: `authenticated` has no `INSERT` or `DELETE` on `profiles` (since `20261118120000`), so the `BEFORE UPDATE` trigger cannot be sidestepped by deleting and re-inserting the row. Creation is the `on_auth_user_created` trigger; deletion is the `delete-account` Edge Function
   - `bio` is used by the web Profile editor and the People screen cards
   - Avatar initials derived from `username` or `email` on the client
+- `public_profiles` (view over `read_public_profiles()`)
+  - The only way a client reads another user's `id`, `username`, `display_name`, `avatar_url`, `bio`; selectable by `anon` and `authenticated`
+  - Returns a profile only when it is not banned, not in a block relationship with the caller, and has finished setup (`profile_completed_at IS NOT NULL`, since `20261125210000`)
+  - The signup trigger seeds `username` from the email local part and `display_name` from the provider's full name as a prefill for the setup screen. Those values are not public until the owner completes setup, so an unfinished account does not resolve to a name anywhere (friend lists, friend requests, mention search, author lookups)
+  - The same rule holds wherever a name leaves the `profiles` table (all since `20261125210000`): `community_contributor_label` falls back to the observation's `author`, `get_blocked_user_profiles()` returns the block row with `NULL` names, and a shared reference's contributor label is `Sporely user`
+  - Tests: `supabase/tests/profile_privacy_test.sql`, `supabase/tests/unfinished_profile_privacy_test.sql`
 - `friendships`
   - Bidirectional friendship rows with status gating: `pending` / `accepted` / `blocked`
   - Columns: `requester_id` (uuid), `addressee_id` (uuid), `status`
@@ -162,11 +169,8 @@ zero existing observations with resolved stable taxonomy-v2 identity. See
 
 ### Community spore-data RPCs
 - Public contributor / measurement aggregates should be exposed through `SECURITY DEFINER` RPCs, not by granting blanket public `SELECT` on `spore_measurements`
-- Existing SQL draft:
-  - `sporely-web/supabase/migrations/supabase_spore_community_schema.sql`
-- People-directory RPC:
-  - `sporely-web/supabase/migrations/supabase_people_directory.sql`
-- Relevant functions in that SQL draft include:
+- Defined in the baseline `supabase/migrations/20260521120000_baseline_live_public_schema.sql` (the older `supabase_spore_community_schema.sql` and `supabase_people_directory.sql` drafts were folded into it); `search_people_directory` was later fixed in `20260613121500_fix_search_people_directory.sql`.
+- Relevant functions include:
   - `search_community_spore_datasets`
   - `get_community_spore_dataset`
   - `community_spore_taxon_summary`
@@ -225,6 +229,7 @@ Full staged design and progress notes: [sporely-py/docs/spore-statistics-species
   - Returns profile fields plus public `finds / species / spores` contributor counts
   - Default behavior: recently active public contributors
   - Search behavior: matches `username` / `display_name`, still returning public stats only
+  - Executable by `anon`. Applies the same visibility rules as `public_profiles`: no banned, blocked-pair or unfinished profiles (`20261125210000`)
 
 ### Edge Functions
 - `delete-account`
@@ -241,6 +246,10 @@ Full staged design and progress notes: [sporely-py/docs/spore-statistics-species
   - Public Stripe webhook endpoint
   - Verifies the Stripe signature with `STRIPE_WEBHOOK_SECRET`
   - Updates `profiles` with Pro entitlement fields after a paid checkout and revokes Pro on matching refunds
+- `admin-ops`
+  - Admin-only moderation and media operations used by `sporely-admin`: report dismiss/resolve, hide reported comment or observation, ban/unban, and preview/purge of expired image tombstones
+- `reference-curation`
+  - Curator workflow for shared reference contributions (claim, request changes, reject, accept to draft, edit draft, deprecate, withdraw, duplicate warnings)
 
 ---
 
@@ -305,7 +314,7 @@ All tables have RLS enabled and default "owner-only" access unless overridden by
 ### RLS: who can write what (high level)
 - Client writes are constrained to rows owned by the authenticated user (`user_id`)
 - Images: canonical media writes are enforced by the R2 upload worker; Supabase Storage `observation-images` is legacy-only and should not receive new uploads
-- Banned Users: A Postgres trigger prevents `INSERT` and `UPDATE` on `observations`, `observation_images`, and `comments` if `profiles.is_banned = true`.
+- Banned users: `private.refuse_banned_writer()` (trigger `trg_000_writer_not_banned`, migration `20261125233000`) refuses `INSERT` and `UPDATE` by a signed-in user whose `profiles.is_banned = true`, or who has no profile row, on every client-writable content table (observations, images, measurements, mosaics and tiles, spore summaries and annotations, identifications, reference uses and the reference library, calibrations, comments, follows, friendships, reports, shares) and on `profiles` updates. The error is `42501` with hint `sporely_account_suspended`. Still allowed: `DELETE` (a banned author can still read and so delete their own comments), a tombstone update that only sets `deleted_at` (plus the `row_version`/`updated_at` bump of the reference sync RPCs), `record_client_activity`, blocking other users, service-role writes, and writes made by other triggers or foreign-key actions. Bans also hide the user's content from others, and the R2 upload worker refuses their uploads.
 - Profile entitlement and quota fields are server-owned; authenticated users can update ordinary profile fields, but not `cloud_plan`, `is_pro`, `full_res_storage_enabled`, `storage_quota_bytes`, `storage_used_bytes`, `billing_status`, `billing_provider`, `billing_customer_id`, `billing_payment_id`, `billing_checkout_session_id`, `billing_updated_at`, `total_storage_bytes`, or `image_count`.
 - The R2 worker updates storage tallies through the service-role RPC `apply_profile_storage_delta`; normal authenticated users cannot call that RPC directly.
 - Free accounts are limited to 20 cloud observations that are private or fuzzed (`visibility != 'public' OR location_precision = 'fuzzed'`), and the database trigger serializes per-user writes so concurrent inserts cannot race past the cap.
@@ -351,7 +360,7 @@ For `avatars`:
 ## Operational checklist (recommended)
 
 1. **Run unique constraints SQL**
-   - File: `sporely-web/supabase/migrations/supabase_unique_constraints.sql`
+   - Now in the baseline `supabase/migrations/20260521120000_baseline_live_public_schema.sql` (the older `supabase_unique_constraints.sql`); sync identity has since moved to `sync_key` (see `docs/plans/completed/2026-10-14-sync-key-identity.md`)
    - Purpose: add/ensure `UNIQUE (desktop_id, user_id)` (or equivalent)
    - Status: ✅ Applied
 2. **Verify media paths**
@@ -387,9 +396,10 @@ For `avatars`:
 ## Where the "real SQL" lives (for maintainers)
 Do not copy policy SQL into this doc.
 Instead, policy/DDL changes live in:
-- `sporely/database/` (schema migrations / DDL artifacts)
-- any standalone SQL files referenced in `sporely/database/` for constraints/RPCs
+- `supabase/migrations/` (production migration history; see the migration-safety rules in `AGENTS.md`)
+- `supabase/schema.sql` (snapshot; regenerate only when a task requires it)
+- `supabase/tests/` (rollback-only SQL regression suites)
 
 If you need exact definitions:
-- update the appropriate SQL files under `sporely/database/`
-- then (optionally) update this doc's descriptions/invariants accordingly
+- read the latest migration that touches the object
+- add a new migration for any change, then (optionally) update this doc's descriptions/invariants accordingly
