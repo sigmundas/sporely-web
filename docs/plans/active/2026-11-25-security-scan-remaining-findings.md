@@ -7,8 +7,9 @@ confirmed the guard on all 20 tables and the comments read policy). Package A
 is done: PR #72, merged as
 `26c3779`, migration `20261125230000` applied to production on 2026-11-25
 through the deploy tree (post-verify passed; a read-only catalog check
-confirmed the policies, grants, view options and trigger functions). Nothing
-else is implemented. Update this line when a work package
+confirmed the policies, grants, view options and trigger functions). Package
+C is implemented on `fix/upload-worker-hardening` (see "Outcome of C"), not
+yet merged or deployed. Nothing else is implemented. Update this line when a work package
 lands; move the file to `completed/` when the list is empty.
 
 Written for an agent that has not seen the session that produced it.
@@ -228,6 +229,65 @@ authors can read (so delete) their own comments. Left open:
 4. **Open proxies.** `/reverse-location` needs no sign-in and `/artsorakel`
    relays any body for any signed-in user with Sporely's token. Neither is
    rate-limited.
+
+Outcome of C (2026-11-25, branch `fix/upload-worker-hardening`; reviewed by
+a Codex challenge and the `sporely-security-reviewer` agent; owner chose a
+2 GiB free quota, worker rate limits of 300/60/60 per minute, and refusing
+octet-stream). Not yet merged or deployed. All four items are closed as
+written:
+
+- C1: uploads from an account with no `profiles` row get 403
+  `profile_missing`; after its final write an upload looks the profile up
+  again and removes its own write if the profile is gone (the reviewers'
+  race: an overwrite could publish after the sweep). New worker route
+  `POST /account/media-sweep` deletes the caller's `<sub>/` prefix in every
+  bucket, only when the profile row is gone. `delete-account` calls it as
+  `sweep_preflight` (first stage: must answer 409 `profile_exists`, so a
+  worker without the route stops the deletion before anything is deleted)
+  and as `sweep_r2_prefix` (between `delete_profile` and
+  `delete_auth_user`, repeated until done, 30 s per call). The function now
+  answers only POST; any authenticated GET used to run the whole plan.
+- C2: overwrites use the temp key in legacy mode too; a throwing promotion
+  now reverses the tally (it used to skip the reversal).
+- C3: `FREE_STORAGE_QUOTA_BYTES` = 2 GiB. The variable never applied
+  before: a null `profiles.storage_quota_bytes` (every account) parsed as 0,
+  read as unlimited. A missing Content-Type and `application/octet-stream`
+  get 415. Uploads return 503 when the worker has no service role (every
+  profile check passed silently before).
+- C4: rate-limit bindings: uploads 300/min per user, Artsorakel 60/min per
+  user (both routes), `/reverse-location` 60/min per IP; 429 `rate_limited`.
+
+Production facts checked read-only on 2026-11-25: no `auth.users` row lacks
+a profile, `on_auth_user_created` is installed, no image, original or mosaic
+key lies outside its owner's prefix, the largest free account uses 82 MB.
+
+Deploy order: worker first, then `delete-account`. Never roll the worker
+back past the sweep route while the new function is live (deletion then
+stops at `sweep_preflight`; nothing is lost).
+
+Left open:
+
+- **Neither app recognises `storage_quota_exceeded`, `rate_limited` or
+  `profile_missing`.** Web retries them like any upload error; the web
+  profile shows "x / quota" only for a per-profile quota, so the 2 GiB
+  limit is invisible. Fix with the suspension mapping in B.
+- **A sweep failure after `delete_profile` still strands the user in the
+  web app** (profile setup, no delete button). The preflight and the
+  timeout make it rare; a retry needs the API. Same class as `INBOX.md`'s
+  "deletion is not resumable".
+- **Cached legacy media stays reachable after deletion.** `media.sporely.no`
+  objects carry a one-year immutable cache; deleting from R2 does not purge
+  the CDN. Part of G, or a cache purge of the account prefix.
+- **Parallel uploads can exceed the quota** (check and tally are separate;
+  also in `INBOX.md`). Two concurrent first writes to the same key can let
+  one request's rollback delete the other's object (pre-existing; keys are
+  random per image).
+- **Upload bytes are not sniffed**: a non-image body labelled `image/jpeg`
+  is stored. Desktop originals can be raw formats, so sniffing needs a list.
+- **The sweep trusts the current bucket bindings.** When the private bucket
+  holds media (G), a deploy without its binding would report the sweep done.
+- `delete_r2_media` rebuilds its whole worklist on each retry (large
+  accounts, `INBOX.md`); the sweep could replace it once G settles buckets.
 
 ### D. Moderation hold
 

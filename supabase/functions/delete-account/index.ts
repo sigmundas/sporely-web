@@ -9,6 +9,7 @@ import { encodeObjectKey, normalizeStoragePath, runDeletionPlan } from './plan.j
 
 const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
 const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+const SWEEP_CALL_TIMEOUT_MS = 30_000
 const mediaUploadBaseUrl = (Deno.env.get('MEDIA_UPLOAD_BASE_URL') ?? 'https://upload.sporely.no').replace(/\/+$/, '')
 
 const admin = createClient(supabaseUrl, serviceRoleKey, {
@@ -43,6 +44,11 @@ Deno.serve(async req => {
 
   if (req.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: corsHeaders })
+  }
+  // Only POST deletes. A GET or HEAD probe with a valid token must not run
+  // the destructive plan.
+  if (req.method !== 'POST') {
+    return json({ error: 'method_not_allowed' }, 405, corsHeaders)
   }
 
   const authHeader = req.headers.get('Authorization')
@@ -84,6 +90,34 @@ Deno.serve(async req => {
           }
         } catch { /* swallow body-read errors */ }
         return { ok: false, status: response.status, detail }
+      } catch (err) {
+        return { ok: false, detail: (err as Error).message }
+      }
+    },
+    async sweepAccountMedia() {
+      try {
+        const response = await fetch(`${mediaUploadBaseUrl}/account/media-sweep`, {
+          method: 'POST',
+          headers: { Authorization: authHeader },
+          // A stalled call must fail the stage (retryable) rather than run
+          // into the function's wall-clock limit.
+          signal: AbortSignal.timeout(SWEEP_CALL_TIMEOUT_MS),
+        })
+        let body: any = null
+        try { body = JSON.parse(await response.text()) } catch { /* non-JSON error body */ }
+        if (response.ok && body?.ok === true) {
+          return {
+            ok: true,
+            status: response.status,
+            deleted: Number(body.deleted || 0),
+            done: body.done === true,
+          }
+        }
+        return {
+          ok: false,
+          status: response.status,
+          detail: body?.error || body?.message || response.statusText || 'unknown',
+        }
       } catch (err) {
         return { ok: false, detail: (err as Error).message }
       }

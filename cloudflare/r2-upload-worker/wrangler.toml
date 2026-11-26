@@ -21,6 +21,25 @@ bucket_name = "sporely-media"
 # binding = "PRIVATE_MEDIA_BUCKET"
 # bucket_name = "sporely-media-private"
 
+# Rate limits (Cloudflare Workers rate-limit bindings; period is 10 or 60 s).
+# Checked in src/index.js by enforceRateLimit; over the limit returns 429
+# `rate_limited`. Per Cloudflare location and approximate. namespace_id is
+# an account-unique integer naming each counter.
+[[ratelimits]]
+name = "UPLOAD_RATE_LIMITER"   # PUT /upload/*, per user id
+namespace_id = "1101"
+simple = { limit = 300, period = 60 }
+
+[[ratelimits]]
+name = "ARTSORAKEL_RATE_LIMITER"   # POST /artsorakel and /artsorakel/media, per user id
+namespace_id = "1102"
+simple = { limit = 60, period = 60 }
+
+[[ratelimits]]
+name = "LOCATION_RATE_LIMITER"   # GET /reverse-location, per client IP
+namespace_id = "1103"
+simple = { limit = 60, period = 60 }
+
 [vars]
 MEDIA_STORAGE_MODE = "legacy"
 SUPABASE_URL = "https://zkpjklzfwzefhjluvhfw.supabase.co"
@@ -28,8 +47,9 @@ SUPABASE_JWT_AUDIENCE = "authenticated"
 MEDIA_PUBLIC_BASE_URL = "https://media.sporely.no"
 ALLOWED_ORIGINS = "https://app.sporely.no,https://sporely.no,https://www.sporely.no,https://localhost:5173,http://localhost:5173,https://localhost,capacitor://localhost"
 MAX_UPLOAD_BYTES = "15728640"
-# Optional free-tier account quota. Set 0 to rely only on per-profile storage_quota_bytes.
-FREE_STORAGE_QUOTA_BYTES = "0"
+# Free-plan account quota (2 GiB). A non-null profiles.storage_quota_bytes
+# overrides it; Pro accounts have no quota. 0 means unlimited.
+FREE_STORAGE_QUOTA_BYTES = "2147483648"
 
 # Optional overrides:
 # SUPABASE_JWT_ISSUER = "https://zkpjklzfwzefhjluvhfw.supabase.co/auth/v1"

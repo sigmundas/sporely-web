@@ -8,6 +8,11 @@
 // STAGE ORDER (children before parents; R2 objects before DB rows; auth
 // user last):
 //
+//   0. sweep_preflight           — ask the worker's sweep route before
+//                                   anything is deleted; it must answer
+//                                   409 profile_exists (or sweep, on a
+//                                   retry). Stops a deletion that could
+//                                   not finish its last media step.
 //   1. media_snapshot            — record R2 media keys BEFORE any DB row
 //                                   is deleted. Reads BOTH
 //                                   observation_images.storage_path (which
@@ -55,7 +60,12 @@
 //  20. delete_observations       — observations.user_id.
 //  21. delete_calibrations       — calibrations.user_id.
 //  22. delete_profile            — profiles.id.
-//  23. delete_auth_user          — admin.auth.admin.deleteUser(uid). LAST so
+//  23. sweep_r2_prefix           — the worker deletes every object left
+//                                   under `<uid>/` in every bucket. Runs
+//                                   only once the profile is gone (the
+//                                   worker checks), after which uploads
+//                                   are refused.
+//  24. delete_auth_user          — admin.auth.admin.deleteUser(uid). LAST so
 //                                   a failure in any earlier stage leaves
 //                                   the auth session intact for retry.
 //
@@ -71,7 +81,10 @@
  * @typedef {{
  *   uid: string,
  *   admin: any,
- *   worker: { deleteKey: (key: string) => Promise<MediaWorkerResult> },
+ *   worker: {
+ *     deleteKey: (key: string) => Promise<MediaWorkerResult>,
+ *     sweepAccountMedia: () => Promise<MediaWorkerResult & { deleted?: number, done?: boolean }>,
+ *   },
  *   r2Keys: Set<string>,
  * }} DeletionContext
  * @typedef {{ ok: true } | { ok: false, error: string }} StageResult
@@ -113,6 +126,11 @@ function assertSnapshotPageLimit(label, pages) {
 // four variants); serial calls would run far past the Edge Function time
 // limit. Bounded so the upload Worker and R2 are not flooded.
 export const R2_DELETE_CONCURRENCY = 16
+
+// Worker sweep calls in sweep_r2_prefix. Each call deletes up to 5,000
+// objects, so this covers far more than any account holds; an account
+// beyond it fails the stage and the user's retry continues the sweep.
+export const SWEEP_MAX_CALLS = 40
 
 /**
  * Calls `fn` for every item with at most `limit` calls in flight. Resolves
@@ -156,6 +174,29 @@ function lastRowId(label, rows) {
 
 /** @type {readonly Stage[]} */
 export const STAGES = Object.freeze([
+  {
+    // Nothing is deleted unless the worker can finish the job: a worker
+    // without the sweep route (404), without its profile lookup (503), or
+    // unreachable would otherwise fail sweep_r2_prefix only after the
+    // profile is gone, leaving an account that can neither upload nor
+    // finish setup. A live account gets 409 profile_exists; a retry after
+    // delete_profile gets a real (harmless) sweep.
+    name: 'sweep_preflight',
+    apply: async ctx => {
+      let outcome
+      try {
+        outcome = await ctx.worker.sweepAccountMedia()
+      } catch (err) {
+        outcome = { ok: false, detail: err?.message }
+      }
+      if (outcome?.ok) return { ok: true }
+      if (outcome?.status === 409 && outcome?.detail === 'profile_exists') return { ok: true }
+      return {
+        ok: false,
+        error: `media sweep not ready: ${outcome?.detail || outcome?.status || 'unknown'}`,
+      }
+    },
+  },
   {
     name: 'media_snapshot',
     apply: async ctx => {
@@ -398,6 +439,37 @@ export const STAGES = Object.freeze([
       } catch (err) {
         return { ok: false, error: err.message }
       }
+    },
+  },
+  {
+    // Deletes every R2 object left under the user's own key prefix: legacy
+    // uploads that never had an image row, uploads that landed after
+    // media_snapshot, abandoned temp keys. The worker runs this only once
+    // the profile row is gone, and refuses uploads without one, so nothing
+    // can land behind it. Each call is bounded; repeat until `done`.
+    name: 'sweep_r2_prefix',
+    apply: async ctx => {
+      let deleted = 0
+      for (let calls = 0; calls < SWEEP_MAX_CALLS; calls++) {
+        let outcome
+        try {
+          outcome = await ctx.worker.sweepAccountMedia()
+        } catch (err) {
+          outcome = { ok: false, detail: err?.message }
+        }
+        if (!outcome?.ok) {
+          return {
+            ok: false,
+            error: `r2 prefix sweep failed: ${outcome?.detail || outcome?.status || 'unknown'}`,
+          }
+        }
+        deleted += Number(outcome.deleted || 0)
+        if (outcome.done) {
+          if (deleted) console.info('[delete-account] prefix sweep removed unlisted objects', { count: deleted })
+          return { ok: true }
+        }
+      }
+      return { ok: false, error: 'r2 prefix sweep did not finish; retry the deletion' }
     },
   },
   {

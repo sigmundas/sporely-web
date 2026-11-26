@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs'
 import {
   SNAPSHOT_PAGE_SIZE,
   R2_DELETE_CONCURRENCY,
+  SWEEP_MAX_CALLS,
   requireSuccess,
   runDeletionPlan,
   STAGES,
@@ -18,6 +19,7 @@ const UID = '00000000-0000-4000-8000-000000000001'
 // ── Structural: every stage matches the audited deletion order ────────
 
 const EXPECTED_ORDER = [
+  'sweep_preflight',
   'media_snapshot',
   'mosaic_media_snapshot',
   'delete_r2_media',
@@ -40,6 +42,7 @@ const EXPECTED_ORDER = [
   'delete_observations',
   'delete_calibrations',
   'delete_profile',
+  'sweep_r2_prefix',
   'delete_auth_user',
 ]
 
@@ -250,8 +253,21 @@ function fakeAdmin(overrides = {}) {
 
 function fakeWorker(overrides = {}) {
   const deleted = []
+  const sweeps = []
+  const sweepResults = [...(overrides.sweepResults || [])]
   return {
     deleted,
+    sweeps,
+    async sweepAccountMedia() {
+      sweeps.push(deleted.length)
+      // The first call is sweep_preflight; a live profile answers 409.
+      if (sweeps.length === 1 && !overrides.preflight) {
+        return { ok: false, status: 409, detail: 'profile_exists' }
+      }
+      if (sweeps.length === 1) return overrides.preflight()
+      if (overrides.sweepThrows) throw new Error(overrides.sweepThrows)
+      return sweepResults.length ? sweepResults.shift() : { ok: true, status: 200, deleted: 0, done: true }
+    },
     async deleteKey(key) {
       deleted.push(key)
       const status = overrides.statusByKey?.[key]
@@ -948,4 +964,81 @@ test('media_snapshot fails closed if the server ignores the keyset filter', asyn
   assert.equal(result.stage, 'media_snapshot')
   assert.match(result.error, /page limit/)
   assert.equal(admin._calls.some(c => c.op === 'deleteUser'), false)
+})
+
+// ── sweep_r2_prefix ─────────────────────────────────────────────────
+
+test('sweep_r2_prefix runs after delete_profile and before delete_auth_user', () => {
+  const profile = STAGES.findIndex(s => s.name === 'delete_profile')
+  const sweep = STAGES.findIndex(s => s.name === 'sweep_r2_prefix')
+  const auth = STAGES.findIndex(s => s.name === 'delete_auth_user')
+  assert.ok(profile >= 0 && sweep >= 0 && auth >= 0)
+  assert.ok(profile < sweep, 'the worker refuses to sweep while the profile exists')
+  assert.ok(sweep < auth, 'a failed sweep must leave the auth user for a retry')
+})
+
+test('runDeletionPlan: sweep_r2_prefix repeats until the worker reports done', async () => {
+  const admin = fakeAdmin()
+  const worker = fakeWorker({
+    sweepResults: [
+      { ok: true, status: 200, deleted: 5000, done: false },
+      { ok: true, status: 200, deleted: 12, done: true },
+    ],
+  })
+  const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+  assert.equal(r.ok, true)
+  assert.equal(worker.sweeps.length, 3, 'preflight plus two sweep calls')
+  assert.ok(admin._calls.find(c => c.op === 'deleteUser'))
+})
+
+test('runDeletionPlan: a failed sweep stops before the auth user is deleted', async () => {
+  for (const overrides of [
+    { sweepResults: [{ ok: false, status: 409, detail: 'profile_exists' }] },
+    { sweepResults: [{ ok: true, status: 200, deleted: 3, done: false }, { ok: false, status: 502, detail: 'media_sweep_failed' }] },
+    { sweepThrows: 'network down' },
+    { sweepResults: Array.from({ length: SWEEP_MAX_CALLS }, () => ({ ok: true, status: 200, deleted: 5000, done: false })) },
+  ]) {
+    const admin = fakeAdmin()
+    const worker = fakeWorker(overrides)
+    const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+    assert.equal(r.ok, false)
+    assert.equal(r.stage, 'sweep_r2_prefix')
+    assert.ok(r.completed.includes('delete_profile'))
+    assert.equal(admin._calls.find(c => c.op === 'deleteUser'), undefined)
+  }
+})
+
+test('sweep_preflight runs first and stops the plan before any deletion when the sweep is not ready', async () => {
+  assert.equal(STAGES[0].name, 'sweep_preflight')
+  for (const preflight of [
+    () => ({ ok: false, status: 404, detail: 'not_found' }),
+    () => ({ ok: false, status: 503, detail: 'sweep_unavailable' }),
+    () => ({ ok: false, status: 409, detail: 'something_else' }),
+    () => ({ ok: false, detail: 'network down' }),
+    () => { throw new Error('timeout') },
+  ]) {
+    const admin = fakeAdmin()
+    const worker = fakeWorker({ preflight })
+    const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+    assert.equal(r.ok, false)
+    assert.equal(r.stage, 'sweep_preflight')
+    assert.deepEqual(r.completed, [])
+    assert.equal(worker.deleted.length, 0)
+    assert.deepEqual(admin._calls, [], 'no database call before the preflight passes')
+  }
+})
+
+test('sweep_preflight accepts a real sweep on a retry after the profile is gone', async () => {
+  const admin = fakeAdmin()
+  const worker = fakeWorker({ preflight: () => ({ ok: true, status: 200, deleted: 7, done: true }) })
+  const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+  assert.equal(r.ok, true)
+})
+
+test('delete-account refuses every method but POST and OPTIONS before running the plan', () => {
+  const source = readFileSync(new URL('./index.ts', import.meta.url), 'utf8')
+  const methodGuard = source.indexOf("req.method !== 'POST'")
+  assert.ok(methodGuard > 0)
+  assert.ok(methodGuard < source.indexOf('auth.getUser()'))
+  assert.ok(methodGuard < source.indexOf('runDeletionPlan({'))
 })

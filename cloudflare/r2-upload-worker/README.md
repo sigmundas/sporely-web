@@ -11,8 +11,13 @@ Cloudflare Worker for authenticated media uploads to the `sporely-media` R2 buck
   - `user_uuid/observation_uuid/field_001.jpg`
   - `user_uuid/observation_uuid/thumb_field_001.jpg`
 - Returns the stored key and optional public URL.
+- Accepts only `image/*` uploads (no SVG/XML, no missing type, no `application/octet-stream`).
+- Refuses uploads from an account with no `profiles` row (`403 profile_missing`), and removes an upload whose profile was deleted while it ran.
+- Overwrites go through a `<key>.pending-<nonce>` temp key in both storage modes, so a failed request keeps the previous object.
 - Tracks successful upload/delete byte deltas in `public.profiles`.
-- Enforces free-tier storage limits when `storage_quota_bytes` or `FREE_STORAGE_QUOTA_BYTES` is set.
+- Enforces the free-plan storage quota: `FREE_STORAGE_QUOTA_BYTES` (2 GiB), or a non-null `profiles.storage_quota_bytes`. Pro accounts are unlimited. Over quota returns `413 storage_quota_exceeded`.
+- `POST /account/media-sweep`: deletes every object under the caller's own `<sub>/` prefix in every bucket, only when the caller has no `profiles` row (otherwise `409 profile_exists`). The `delete-account` Edge Function calls it first as a readiness check and again after deleting the profile. At most 5,000 objects per call; repeat until the response says `done: true`.
+- Rate limits (Cloudflare `[[ratelimits]]` bindings): uploads 300/min per user, Artsorakel 60/min per user, `/reverse-location` 60/min per client IP. Over the limit returns `429 rate_limited`. `/healthz` reports which limiters are bound.
 
 ## Expected Bindings and Vars
 
@@ -28,9 +33,15 @@ See `wrangler.toml` and `wrangler.toml.example`.
 - optional `SUPABASE_JWT_ISSUER`
 - optional `SUPABASE_JWKS_URL`
 - optional `SUPABASE_JWT_SECRET`
-- secret `SUPABASE_SERVICE_ROLE_KEY` for profile storage tally/quota updates
+- secret `SUPABASE_SERVICE_ROLE_KEY` — required: profile lookup (ban, deletion, quota) and storage tally. Uploads return `503 upload_unavailable` and the sweep `503 sweep_unavailable` without it.
 - secret `ARTSORAKEL_API_TOKEN` — Artsdatabanken Artsorakel `/identify` bearer token. Required for `/artsorakel` and `/artsorakel/media` routes.
-- optional `FREE_STORAGE_QUOTA_BYTES`
+- `FREE_STORAGE_QUOTA_BYTES` (0 = unlimited)
+- rate limiters `UPLOAD_RATE_LIMITER`, `ARTSORAKEL_RATE_LIMITER`, `LOCATION_RATE_LIMITER` (optional; unbound means no limit)
+
+Deploy the worker before any `delete-account` version that calls
+`/account/media-sweep`. Never roll the worker back to a version without that
+route while such a function is live: every account deletion then stops at
+`sweep_preflight` (nothing deleted, but deletion is unavailable).
 
 ## Deploy
 
