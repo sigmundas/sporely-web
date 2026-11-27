@@ -710,8 +710,9 @@ A desktop profile stores the account its database syncs with as
 `linked_cloud_user_id` in the profile's app settings, not in the database. A
 linked database refuses every other account (`AccountMismatchError`). An
 unlinked database binds on its first sign-in or sync only when it holds no
-observations with a `cloud_id`, or when the signed-in account owns at least
-one of up to 50 of those observations, most recently synced first. Otherwise
+observations with a `cloud_id`, or when the signed-in account owns every one
+of up to 50 of those observations, most recently synced first; a sampled
+`cloud_id` that is not a valid observation id refuses the link. Otherwise
 the desktop refuses the account and saves no link; a refused sign-in also saves
 no credentials. A copied or
 restored database therefore cannot adopt whichever account a browser sign-in
@@ -864,6 +865,24 @@ The gallery checkbox and context-menu command share this lifecycle:
 - recheck before sync cancels that tombstone, preserves the existing cloud ID, removes the image id from the storage-excluded set, and performs no upload or delete;
 - after successful remote deletion, the checkbox remains unchecked and the synced tombstone yields `DELETED` with no cloud badge;
 - recheck after `DELETED` preserves the historical tombstone, detaches the old identity, and explicitly restores exactly that image as a new cloud row.
+
+### Delete observation everywhere (desktop pending-delete intent)
+
+- Before deleting a cloud-linked observation locally, the desktop records the
+  intent `sporely_cloud_observation_delete_pending_<cloud id>` in its database
+  settings, valued with the owning cloud account id. The cloud delete follows
+  the local delete; a failed or interrupted cloud delete is finished by the
+  next write-enabled sync, and pull does not re-import the observation
+  meanwhile.
+- A pending delete is sent only when its recorded owner is non-empty and
+  equals the signed-in account. An intent without an owner is never sent.
+- An intent whose observation is linked to a local row again is void and is
+  dropped without a cloud write.
+- A delete intent never crosses a full restore: a backup does not carry
+  pending-delete records and a restore drops any it finds, so a restored
+  backup (stale or from elsewhere) cannot replay cloud deletes. Only keys that
+  literally start with the prefix are delete intents. (Desktop, security
+  audit F06, 2026-11-27.)
 
 ### Remote deletion discovered on desktop
 
