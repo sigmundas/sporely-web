@@ -13,59 +13,93 @@
 //                                   409 profile_exists (or sweep, on a
 //                                   retry). Stops a deletion that could
 //                                   not finish its last media step.
-//   1. media_snapshot            — record R2 media keys BEFORE any DB row
+//   1. check_r2_configuration    — list '<uid>/' once through ctx.r2 and
+//                                   probe delete permission (deleting a key
+//                                   that does not exist). A missing or
+//                                   misconfigured R2 client fails here, before
+//                                   the sign-out and the write fence.
+//   2. sign_out_everywhere       — admin.auth.admin.signOut(token, 'global').
+//   3. begin_account_deletion    — rpc begin_account_deletion: write the
+//                                   account-deletion marker (write fence).
+//   4. media_snapshot            — record R2 media keys BEFORE any DB row
 //                                   is deleted. Reads BOTH
 //                                   observation_images.storage_path (which
 //                                   has a paired thumb_ variant by contract)
 //                                   AND observation_images.original_storage_path
 //                                   (owner-only original, standalone — NO
 //                                   thumb companion manufactured).
-//   2. mosaic_media_snapshot     — record spore_measurement_mosaics.storage_key
+//   5. mosaic_media_snapshot     — record spore_measurement_mosaics.storage_key
 //                                   R2 keys BEFORE their DB rows are deleted.
 //                                   Mosaics have no separate thumb variant.
-//   3. delete_r2_media           — delete each snapshotted R2 media object
-//                                   (observation + mosaic keys), at most
-//                                   R2_DELETE_CONCURRENCY at once. 404 = success.
-//                                   The upload worker attempts both the
-//                                   legacy public bucket AND the private
-//                                   bucket for each key.
-//   4. delete_legacy_storage     — legacy Supabase Storage folders
+//   6. calibration_media_snapshot — record calibrations.image_storage_path
+//                                   R2 keys BEFORE the rows are deleted.
+//                                   The snapshots are keyset-paged.
+//   7. delete_r2_prefix          — list and delete EVERY object under
+//                                   '<uid>/' in every configured R2 bucket
+//                                   (legacy public and private) through the
+//                                   S3-compatible API (ctx.r2). Since the
+//                                   media-key retirement migration every new
+//                                   or changed key column must live under
+//                                   '<uid>/' for every role, so the prefix
+//                                   covers released images (NULL paths), late
+//                                   Worker writes and every variant without
+//                                   guessing.
+//   8. delete_r2_media           — delete each snapshotted R2 media object
+//                                   (observation, mosaic and calibration
+//                                   keys), at most R2_DELETE_CONCURRENCY at
+//                                   once. 404 = success. The upload worker
+//                                   attempts both the legacy public bucket
+//                                   AND the private bucket for each key.
+//   9. delete_legacy_storage     — legacy Supabase Storage folders
 //                                   (observation-images/${uid}, avatars/${uid}).
-//   5. scrub_mentions            — remove ONLY the deleted uid from
+//  10. scrub_mentions            — remove ONLY the deleted uid from
 //                                   comments.mentioned_user_ids of OTHER
 //                                   users' comments. Uses an SQL-safe RPC
 //                                   so co-mentioned uuids in the same row
 //                                   are preserved.
-//   6. delete_client_activity    — client_activity_daily.
-//   7. delete_follows            — follows.user_id + follows.target_id (only
+//  11. delete_client_activity    — client_activity_daily.
+//  12. delete_follows            — follows.user_id + follows.target_id (only
 //                                   when target_type='user' — target_id is
 //                                   polymorphic text).
-//   8. delete_reports            — reports.reporter_id + reported_user_id.
-//   9. delete_identifications    — observation_identifications.user_id.
-//  10. delete_spore_summaries    — observation_spore_summaries.user_id.
-//  11. delete_mosaics            — spore_measurement_mosaics.user_id
-//                                   (R2 objects already gone at step 3).
-//  12. delete_user_blocks        — blocker_id + blocked_id.
-//  13. delete_friendships        — requester_id + addressee_id.
-//  14. delete_observation_shares — owner_id + shared_with_id.
-//  15. delete_comments           — comments.user_id.
-//  16. delete_spore_annotations  — spore_annotations.user_id.
-//  17. delete_spore_measurements — spore_measurements.user_id.
-//  18. delete_reference_library_for_account — atomically mark reference
+//  13. delete_reports            — reports.reporter_id + reported_user_id.
+//  14. delete_identifications    — observation_identifications.user_id.
+//  15. delete_spore_summaries    — observation_spore_summaries.user_id.
+//  16. delete_mosaics            — spore_measurement_mosaics.user_id
+//                                   (R2 objects already gone at steps 7-8).
+//  17. delete_user_blocks        — blocker_id + blocked_id.
+//  18. delete_friendships        — requester_id + addressee_id.
+//  19. delete_observation_shares — owner_id + shared_with_id.
+//  20. delete_comments           — comments.user_id.
+//  21. delete_spore_annotations  — spore_annotations.user_id.
+//  22. delete_spore_measurements — spore_measurements.user_id.
+//  23. delete_reference_library_for_account — atomically mark reference
 //                                   mutations closed and delete the owner's
 //                                   normalized reference graph through the
 //                                   service-role-only RPC of the same name.
-//  19. delete_observation_images — observation_images.user_id
-//                                   (R2 objects already gone at step 3).
-//  20. delete_observations       — observations.user_id.
-//  21. delete_calibrations       — calibrations.user_id.
-//  22. delete_profile            — profiles.id.
-//  23. sweep_r2_prefix           — the worker deletes every object left
+//  24. delete_observation_images — observation_images.user_id
+//                                   (R2 objects already gone at steps 7-8).
+//  25. delete_observations       — observations.user_id.
+//  26. delete_calibrations       — calibrations.user_id.
+//  27. delete_r2_prefix_second_pass — the prefix delete again, catching
+//                                   uploads that raced the first pass.
+//  28. verify_r2_prefix_empty    — list '<uid>/' in every bucket; anything
+//                                   left fails the run before the account
+//                                   is deleted, so the user can retry.
+//  29. erase_media_retirements   — public.erase_account_media_retirements:
+//                                   remove the user's media-key registry rows
+//                                   (allowed only once the account-deletion
+//                                   marker exists and no content rows remain).
+//                                   If a content row is still there (a write
+//                                   that passed the guard just before step 3
+//                                   committed), the run waits briefly and
+//                                   repeats steps 4-29 once.
+//  30. delete_profile            — profiles.id.
+//  31. sweep_r2_prefix           — the worker deletes every object left
 //                                   under `<uid>/` in every bucket. Runs
 //                                   only once the profile is gone (the
 //                                   worker checks), after which uploads
 //                                   are refused.
-//  24. delete_auth_user          — admin.auth.admin.deleteUser(uid). LAST so
+//  32. delete_auth_user          — admin.auth.admin.deleteUser(uid). LAST so
 //                                   a failure in any earlier stage leaves
 //                                   the auth session intact for retry.
 //
@@ -86,8 +120,15 @@
  *     sweepAccountMedia: () => Promise<MediaWorkerResult & { deleted?: number, done?: boolean }>,
  *   },
  *   r2Keys: Set<string>,
+ *   signOutEverywhere?: () => Promise<{ error?: { message: string } | null }>,
+ *   r2?: {
+ *     listObjects: (prefix: string) => Promise<{ ok: boolean, objects?: Array<{ bucket: string, key: string }>, error?: string }>,
+ *     deleteObjects: (objects: Array<{ bucket: string, key: string }>) => Promise<{ ok: boolean, error?: string }>,
+ *     probeDelete: (prefix: string) => Promise<{ ok: boolean, error?: string }>,
+ *   },
+ *   sleep?: (ms: number) => Promise<void>,
  * }} DeletionContext
- * @typedef {{ ok: true } | { ok: false, error: string }} StageResult
+ * @typedef {{ ok: true } | { ok: false, error: string, rerunContentStages?: boolean }} StageResult
  * @typedef {{ name: string, apply: (ctx: DeletionContext) => Promise<StageResult> }} Stage
  */
 
@@ -126,6 +167,13 @@ function assertSnapshotPageLimit(label, pages) {
 // four variants); serial calls would run far past the Edge Function time
 // limit. Bounded so the upload Worker and R2 are not flooded.
 export const R2_DELETE_CONCURRENCY = 16
+
+// erase_account_media_retirements refuses with this hint while content rows
+// remain; the run then repeats the stages from CONTENT_RERUN_FROM once,
+// after CONTENT_RERUN_DELAY_MS.
+export const ACCOUNT_NOT_ERASABLE_HINT = 'sporely_account_not_erasable'
+export const CONTENT_RERUN_FROM = 'media_snapshot'
+export const CONTENT_RERUN_DELAY_MS = 2000
 
 // Worker sweep calls in sweep_r2_prefix. Each call deletes up to 5,000
 // objects, so this covers far more than any account holds; an account
@@ -198,6 +246,71 @@ export const STAGES = Object.freeze([
     },
   },
   {
+    // Before anything changes: the prefix erasure needs a configured R2
+    // client with list access. A failure here leaves the account untouched
+    // (no sign-out, no fence).
+    name: 'check_r2_configuration',
+    apply: async ctx => {
+      try {
+        const prefix = userMediaPrefix(ctx.uid)
+        await listPrefix(ctx, prefix)
+        // List access alone is not enough: a list-only token would pass and
+        // then fail at the first delete, after the sign-out and the fence.
+        if (typeof ctx.r2.probeDelete !== 'function') throw new Error('r2 delete check is not configured')
+        const probe = await ctx.r2.probeDelete(prefix)
+        if (!probe?.ok) throw new Error(`r2 delete check failed: ${probe?.error || 'unknown'}`)
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: err.message }
+      }
+    },
+  },
+  {
+    // Revoke every session of the account first (global sign-out), so no
+    // other device keeps writing while the account is erased. A partial
+    // failure later is retried after a fresh sign-in; the write fence (the
+    // account-deletion marker) refuses content writes meanwhile.
+    name: 'sign_out_everywhere',
+    apply: async ctx => {
+      if (typeof ctx.signOutEverywhere !== 'function') {
+        return { ok: false, error: 'global sign-out is not configured' }
+      }
+      try {
+        const result = await ctx.signOutEverywhere()
+        if (result?.error) {
+          const msg = String(result.error.message || '').toLowerCase()
+          // An already-revoked session is the expected state on a retry.
+          if (msg.includes('not found') || msg.includes('session_not_found')) return { ok: true }
+          return { ok: false, error: `global sign-out: ${result.error.message}` }
+        }
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: err.message }
+      }
+    },
+  },
+  {
+    // Write the account-deletion marker right after the sign-out, so the
+    // database write fence (media-key guard) covers the whole run. The same
+    // marker delete_reference_library_for_account writes later; idempotent.
+    name: 'begin_account_deletion',
+    apply: async ctx => {
+      try {
+        const result = await requireSuccess(
+          'rpc begin_account_deletion',
+          ctx.admin.rpc('begin_account_deletion', { p_user_id: ctx.uid }),
+        )
+        // Only a written fence counts; e.g. not_found must stop the run.
+        if (result?.status !== 'fenced') {
+          return { ok: false, error: `begin_account_deletion: ${result?.status || 'no status'}` }
+        }
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: err.message }
+      }
+    },
+  },
+  {
     name: 'media_snapshot',
     apply: async ctx => {
       try {
@@ -264,6 +377,34 @@ export const STAGES = Object.freeze([
       }
     },
   },
+  {
+    name: 'calibration_media_snapshot',
+    apply: async ctx => {
+      try {
+        // Paged like the image and mosaic snapshots.
+        let lastId = null
+        for (let pages = 0; ; pages++) {
+          assertSnapshotPageLimit('calibration media snapshot', pages)
+          const rows = await requireSuccess(
+            'select calibrations.image_storage_path',
+            keysetPage(ctx.admin.from('calibrations')
+              .select('id, image_storage_path')
+              .eq('user_id', ctx.uid), lastId),
+          ) || []
+          for (const row of rows) {
+            const key = normalizeStoragePath(row.image_storage_path)
+            if (key) ctx.r2Keys.add(key)
+          }
+          if (!rows.length) break
+          lastId = lastRowId('calibration media snapshot', rows)
+        }
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: err.message }
+      }
+    },
+  },
+  _prefixDelete('delete_r2_prefix'),
   {
     name: 'delete_r2_media',
     apply: async ctx => {
@@ -427,6 +568,45 @@ export const STAGES = Object.freeze([
   _simpleDelete('delete_observation_images', 'observation_images', 'user_id'),
   _simpleDelete('delete_observations', 'observations', 'user_id'),
   _simpleDelete('delete_calibrations', 'calibrations', 'user_id'),
+  _prefixDelete('delete_r2_prefix_second_pass'),
+  {
+    name: 'verify_r2_prefix_empty',
+    apply: async ctx => {
+      try {
+        const prefix = userMediaPrefix(ctx.uid)
+        const remaining = await listPrefix(ctx, prefix)
+        if (remaining.length) {
+          const buckets = [...new Set(remaining.map(o => o.bucket))].join(',')
+          return { ok: false, error: `r2 prefix not empty: ${remaining.length} object(s) left in ${buckets}` }
+        }
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: err.message }
+      }
+    },
+  },
+  {
+    name: 'erase_media_retirements',
+    apply: async ctx => {
+      try {
+        const result = await ctx.admin.rpc('erase_account_media_retirements', { p_user_id: ctx.uid })
+        if (result?.error) {
+          return {
+            ok: false,
+            error: `rpc erase_account_media_retirements: ${result.error.message || 'unknown error'}`,
+            // A content row is left. The usual cause is a client write that
+            // passed the media-key guard just before begin_account_deletion
+            // committed; the fence refuses every later write, so one more
+            // pass of the content stages removes it.
+            rerunContentStages: result.error.hint === ACCOUNT_NOT_ERASABLE_HINT,
+          }
+        }
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: err.message }
+      }
+    },
+  },
   {
     name: 'delete_profile',
     apply: async ctx => {
@@ -504,6 +684,56 @@ function _simpleDelete(name, table, column) {
   }
 }
 
+// Prefix deletion through ctx.r2 (S3-compatible R2 client, every configured
+// bucket). Idempotent: an empty prefix is success.
+function _prefixDelete(name) {
+  return {
+    name,
+    apply: async ctx => {
+      try {
+        const prefix = userMediaPrefix(ctx.uid)
+        // Bounded loop: list a page, delete it, until the listing is empty.
+        for (let round = 0; round < 1000; round += 1) {
+          const objects = await listPrefix(ctx, prefix)
+          if (!objects.length) return { ok: true }
+          const outcome = await ctx.r2.deleteObjects(objects)
+          if (!outcome?.ok) {
+            return { ok: false, error: `r2 prefix delete failed: ${outcome?.error || 'unknown'}` }
+          }
+        }
+        return { ok: false, error: 'r2 prefix delete did not converge' }
+      } catch (err) {
+        return { ok: false, error: err.message }
+      }
+    },
+  }
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** '<uid>/' — refuses anything that is not a UUID, so a bad uid can never
+ * widen the prefix to a whole bucket. */
+export function userMediaPrefix(uid) {
+  const value = String(uid ?? '').trim()
+  if (!UUID_PATTERN.test(value)) throw new Error('refusing r2 prefix for a non-uuid account id')
+  return `${value.toLowerCase()}/`
+}
+
+async function listPrefix(ctx, prefix) {
+  if (!ctx.r2 || typeof ctx.r2.listObjects !== 'function') {
+    throw new Error('r2 prefix deletion is not configured')
+  }
+  const listed = await ctx.r2.listObjects(prefix)
+  if (!listed?.ok) throw new Error(`r2 list failed: ${listed?.error || 'unknown'}`)
+  const objects = Array.isArray(listed.objects) ? listed.objects : []
+  for (const object of objects) {
+    if (!String(object?.key || '').startsWith(prefix)) {
+      throw new Error('r2 list returned a key outside the account prefix')
+    }
+  }
+  return objects
+}
+
 // ── driver ────────────────────────────────────────────────────────────
 
 /**
@@ -515,14 +745,35 @@ function _simpleDelete(name, table, column) {
  */
 export async function runDeletionPlan(ctx) {
   const completed = []
-  for (const stage of STAGES) {
+  let rerun = false
+  for (let index = 0; index < STAGES.length; index += 1) {
+    const stage = STAGES[index]
     const outcome = await stage.apply(ctx)
     if (!outcome.ok) {
+      // Finding 8: once per run, after a short wait for in-flight writes to
+      // commit, repeat every stage from the first snapshot through the
+      // erase. All of them are idempotent.
+      if (outcome.rerunContentStages && !rerun) {
+        rerun = true
+        // Every key the first pass collected was deleted (delete_r2_media
+        // succeeded, or the run would not have reached the erase). Forget
+        // them so the rerun sends Worker DELETEs only for keys of rows that
+        // appeared since; the prefix deletes still cover every object.
+        ctx.r2Keys.clear()
+        await (ctx.sleep ?? defaultSleep)(CONTENT_RERUN_DELAY_MS)
+        index = STAGES.findIndex(s => s.name === CONTENT_RERUN_FROM) - 1
+        continue
+      }
       return { ok: false, stage: stage.name, error: outcome.error, completed }
     }
     completed.push(stage.name)
   }
   return { ok: true, completed }
+}
+
+
+function defaultSleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 // ── helpers ───────────────────────────────────────────────────────────

@@ -1,4 +1,5 @@
-import { DeleteObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3'
+import { DeleteObjectCommand, DeleteObjectsCommand, HeadObjectCommand, ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3'
+import { parsePrivateBucketSetting } from '../_shared/r2Buckets.ts'
 
 const DEFAULT_TOMBSTONE_RESTORE_WINDOW_DAYS = 30
 const PURGE_CANDIDATE_LIMIT = 500
@@ -39,6 +40,10 @@ export async function handleAdminAction(context: AdminActionContext): Promise<Ad
       return previewPurgeTombstonedImages(context)
     case 'purge_expired_tombstoned_images':
       return purgeExpiredTombstonedImages(context)
+    case 'sweep_retired_media_keys':
+      return sweepRetiredMediaKeys(context)
+    case 'sweep_orphan_media_prefixes':
+      return sweepOrphanMediaPrefixes(context)
     case 'dismiss_report':
       return updateReportStatus(context, 'dismissed')
     case 'resolve_report':
@@ -122,6 +127,11 @@ async function previewPurgeTombstonedImages(context: AdminActionContext): Promis
 }
 
 async function purgeExpiredTombstonedImages(context: AdminActionContext): Promise<AdminActionResponse> {
+  // Step 0 (media-key retirement plan): backend-enforced purge disable. Checked
+  // here before the R2 preflight, and again per row in purgeSingleTombstoneRow.
+  if (!isTombstonePurgeEnabled(context.env)) {
+    return actionFailureResponse(409, TOMBSTONE_PURGE_DISABLED, 'Tombstone purge is disabled on the server')
+  }
   const selection = await loadTombstoneSelection(context.adminClient, context.requestBody, context.env)
   const previewRows = selection.rows.map(row =>
     buildTombstonePreviewRow(row, selection.restoreWindowDays, getMediaPublicBaseUrl(context.env)),
@@ -1132,13 +1142,23 @@ function summarizeTombstoneRows(rows: Array<Record<string, unknown>>) {
   return counts
 }
 
-async function purgeSingleTombstoneRow(
-  context: AdminActionContext,
+export async function purgeSingleTombstoneRow(
+  context: Pick<AdminActionContext, 'adminClient' | 'env'>,
   row: Record<string, unknown>,
-  r2Client: R2MultiBucketClient,
+  r2Client: Pick<R2MultiBucketClient, 'deleteObjects'>,
 ) {
   const now = new Date().toISOString()
   const rowId = row.id
+
+  // Re-checked for every row, before any R2 call or row write: the batch loop
+  // iterates preselected rows and would otherwise never see the disable.
+  if (!isTombstonePurgeEnabled(context.env)) {
+    return {
+      ...row,
+      status: 'skipped',
+      error: TOMBSTONE_PURGE_DISABLED,
+    }
+  }
   const deleteTargets = Array.isArray(row.delete_targets) ? row.delete_targets.map(value => normalizeMediaKey(value)) : []
 
   if (!deleteTargets.length) {
@@ -1155,15 +1175,102 @@ async function purgeSingleTombstoneRow(
     }
   }
 
+  // Stage 0a: claim the tombstone and retire its key family in one database
+  // transaction BEFORE any R2 call, and delete only the keys the claim
+  // returns (never the client-side buildTombstoneDeleteTargets list). One
+  // claim UUID per row attempt; it is returned in the row result, which the
+  // action log keeps.
+  const claimId = crypto.randomUUID()
+  const claim = await callRpcWithRetry(context.adminClient, 'claim_tombstoned_image_purge', {
+    p_claim_id: claimId,
+    p_image_id: rowId,
+    p_restore_window_days: getRestoreWindowDays(context.env),
+  })
+  const claimResult: Record<string, any> = normalizeRecord(claim.data) ?? {}
+  const claimStatus = claim.error ? 'claim_failed' : normalizeText(claimResult.status)
+  if (claimStatus === 'already_claimed') {
+    // An earlier attempt claimed the row; its record's stored keys are
+    // deleted (and the row finalized) by sweep_retired_media_keys.
+    return {
+      ...row,
+      status: 'skipped',
+      skip_reason: 'already_claimed',
+      claim_id: claimId,
+      retirement_id: claimResult.retirement_id ?? null,
+      message: 'Already claimed; run sweep_retired_media_keys to finish it',
+    }
+  }
+  if (claimStatus !== 'claimed') {
+    const purgeError = claim.error
+      ? `purge_claim_failed: ${claim.error.message || claim.error.code || 'unknown'}`.slice(0, 500)
+      : (claimStatus || 'purge_claim_failed')
+    await updateTombstonePurgeMetadata(context.adminClient, rowId, {
+      purge_attempted_at: now,
+      purge_error: purgeError,
+    })
+    return {
+      ...row,
+      status: 'error',
+      error: purgeError,
+      claim_id: claimId,
+      purge_attempted_at: now,
+      purge_error: purgeError,
+    }
+  }
+  // The claim's keys are passed to R2 as stored. A key the R2 client would
+  // normalize into another object (whitespace, a leading slash) is refused
+  // and nothing is deleted for this row.
+  const { keys: claimedKeys, rejected: rejectedClaimKeys } = canonicalDeleteKeys(claimResult.delete_keys)
+  if (rejectedClaimKeys > 0) {
+    const purgeError = 'noncanonical_delete_key'
+    await updateTombstonePurgeMetadata(context.adminClient, rowId, {
+      purge_attempted_at: now,
+      purge_error: purgeError,
+    })
+    return {
+      ...row,
+      status: 'error',
+      error: purgeError,
+      claim_id: claimId,
+      retirement_id: claimResult.retirement_id ?? null,
+      purge_attempted_at: now,
+      purge_error: purgeError,
+    }
+  }
+
+  // The quota is debited per key through the deletion ledger (see
+  // mediaDeleteLedger); finalize_observation_image_purge only marks the row.
+  const ownerId = normalizeText(row.user_id)
+  if (claimedKeys.length && !isValidTombstoneUuid(ownerId)) {
+    const purgeError = 'purge_owner_missing'
+    await updateTombstonePurgeMetadata(context.adminClient, rowId, {
+      purge_attempted_at: now,
+      purge_error: purgeError,
+    })
+    return {
+      ...row,
+      status: 'error',
+      error: purgeError,
+      claim_id: claimId,
+      retirement_id: claimResult.retirement_id ?? null,
+      purge_attempted_at: now,
+      purge_error: purgeError,
+    }
+  }
   let deletion
   try {
-    deletion = await r2Client.deleteObjects(deleteTargets)
+    if (claimedKeys.length) {
+      const ledger = mediaDeleteLedger(context.adminClient, ownerId, claimedKeys)
+      deletion = await r2Client.deleteObjects(ledger.keys, ledger.hooks)
+    } else {
+      deletion = { logicalBytes: 0, targets: [] }
+    }
   } catch (error) {
     const failure = normalizeActionFailure(error)
+    // Only sizes measured in R2 count: stored_bytes is client-written.
     const retryAccountingBytes = Math.max(
       0,
       Number(row.purge_accounting_bytes || 0),
-      Number(row.stored_bytes || 0),
       Number(failure.details?.logicalBytes || 0),
     )
     await updateTombstonePurgeMetadata(context.adminClient, rowId, {
@@ -1175,6 +1282,8 @@ async function purgeSingleTombstoneRow(
       ...row,
       status: 'error',
       error: failure.message,
+      claim_id: claimId,
+      delete_targets: claimedKeys,
       purge_attempted_at: now,
       purge_error: failure.message,
     }
@@ -1184,7 +1293,6 @@ async function purgeSingleTombstoneRow(
     0,
     Number(deletion.logicalBytes || 0),
     Number(row.purge_accounting_bytes || 0),
-    Number(row.stored_bytes || 0),
   )
   const snapshotResult = await updateTombstonePurgeMetadata(context.adminClient, rowId, {
     purge_attempted_at: now,
@@ -1200,7 +1308,7 @@ async function purgeSingleTombstoneRow(
     }
   }
 
-  const { error: finalizeError } = await context.adminClient.rpc('finalize_observation_image_purge', {
+  const { error: finalizeError } = await callRpcWithRetry(context.adminClient, 'finalize_observation_image_purge', {
     p_image_id: rowId,
     p_purged_at: now,
     p_storage_bytes: accountingBytes,
@@ -1229,6 +1337,9 @@ async function purgeSingleTombstoneRow(
     message: 'Purged successfully',
     logical_bytes_deleted: accountingBytes,
     bucket_results: deletion.targets,
+    claim_id: claimId,
+    retirement_id: claimResult.retirement_id ?? null,
+    delete_targets: claimedKeys,
   }
   const issueFlags = buildImageIssueFlags(purgedRow, false)
 
@@ -1238,6 +1349,512 @@ async function purgeSingleTombstoneRow(
     issue_flags: issueFlags,
     issue_severity: buildMediaIssueSeverity(purgedRow, false),
     issue_summary: buildIssueSummary(issueFlags),
+  }
+}
+
+// Plan §L retry policy for every RPC caller: SQLSTATE 40P01 (deadlock),
+// 40001 (serialization failure) and 55P03 (lock not available), at most 3
+// attempts with 100-400 ms random jitter. The claim, sweep and finalize RPCs
+// are idempotent, so a retry after an abort is safe.
+export const RETRYABLE_RPC_SQLSTATES = new Set(['40P01', '40001', '55P03'])
+
+export async function callRpcWithRetry(
+  adminClient: any,
+  fn: string,
+  args: Record<string, unknown>,
+  options: { attempts?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<{ data: any; error: any; attempts: number }> {
+  const attempts = options.attempts ?? 3
+  const sleep = options.sleep ?? ((ms: number) => new Promise(resolve => setTimeout(resolve, ms)))
+  let last: { data: any; error: any } = { data: null, error: null }
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    last = await adminClient.rpc(fn, args)
+    const code = normalizeText(last?.error?.code)
+    if (!last?.error || !RETRYABLE_RPC_SQLSTATES.has(code) || attempt === attempts) {
+      return { data: last?.data ?? null, error: last?.error ?? null, attempts: attempt }
+    }
+    await sleep(100 + Math.floor(Math.random() * 301))
+  }
+  return { data: last.data, error: last.error, attempts }
+}
+
+const SWEEP_BATCH_LIMIT_DEFAULT = 50
+const SWEEP_BATCH_LIMIT_MAX = 500
+const SWEEP_MAX_BATCHES = 10
+
+// Repeatable sweep of retired media keys (Stage 0a item 6/8): claim a batch
+// of retirement records (the database re-checks references under the key
+// locks and moves every handed-out record to the back of the queue through
+// last_attempted_at), delete exactly their stored delete_keys, finalize
+// interrupted purges, then record the finished ones. Never computes keys.
+async function sweepRetiredMediaKeys(context: AdminActionContext): Promise<AdminActionResponse> {
+  if (!isTombstonePurgeEnabled(context.env)) {
+    return actionFailureResponse(409, TOMBSTONE_PURGE_DISABLED, 'Tombstone purge (and the retired-key sweep) is disabled on the server')
+  }
+  const reason = requireNonEmptyText(context.requestBody?.reason, 'Reason is required')
+  if (!reason.ok) {
+    return actionFailureResponse(400, reason.code, reason.message)
+  }
+  const limit = Math.min(SWEEP_BATCH_LIMIT_MAX, normalizePositiveInteger(context.requestBody?.limit, SWEEP_BATCH_LIMIT_DEFAULT))
+  const batches = Math.min(SWEEP_MAX_BATCHES, normalizePositiveInteger(context.requestBody?.batches, 1))
+
+  return await withAdminActionLog({
+    adminClient: context.adminClient,
+    adminUser: context.adminUser,
+    action: 'sweep_retired_media_keys',
+    targetType: 'media_key_retirement_batch',
+    targetId: `limit:${limit}:batches:${batches}`,
+    reason: reason.value,
+    requestPayload: context.requestBody,
+    beforeSnapshot: { limit, batches },
+    run: async () => runRetiredKeySweep(context, { limit, batches }),
+  })
+}
+
+export async function runRetiredKeySweep(
+  context: Pick<AdminActionContext, 'adminClient' | 'env'>,
+  options: { limit: number; batches: number },
+  r2ClientFactory: (preflightKey: string) => Promise<{ ok: true; client: Pick<R2MultiBucketClient, 'deleteObjects'> } | { ok: false; failure: ActionFailure }> =
+    key => prepareR2PurgeClient(context.env, key),
+) {
+  const rows: Array<Record<string, unknown>> = []
+  const counts = { swept: 0, guard_failed: 0, errors: 0, finalized: 0 }
+  let r2Client: Pick<R2MultiBucketClient, 'deleteObjects'> | null = null
+
+  for (let batch = 0; batch < options.batches; batch += 1) {
+    if (!isTombstonePurgeEnabled(context.env)) break
+    const claimed = await callRpcWithRetry(context.adminClient, 'claim_retired_key_sweep', { p_limit: options.limit })
+    if (claimed.error) {
+      throw actionError(500, 'sweep_claim_failed', `claim_retired_key_sweep failed: ${claimed.error.message || claimed.error.code}`)
+    }
+    const records = Array.isArray(claimed.data) ? claimed.data : []
+    if (!records.length) break
+    const recordedIds: number[] = []
+
+    for (const record of records) {
+      const retirementId = Number(record.retirement_id)
+      const { keys, rejected: rejectedKeys } = canonicalDeleteKeys(record.delete_keys)
+      if (record.status !== 'ok' || rejectedKeys > 0) {
+        counts.guard_failed += 1
+        const blocking = record.status !== 'ok'
+          ? (record.blocking_references ?? null)
+          : [{ reason: 'noncanonical_delete_key', count: rejectedKeys }]
+        rows.push({ retirement_id: retirementId, image_id: record.image_id, reason: record.reason, status: 'guard_failed', blocking_references: blocking })
+        recordedIds.push(retirementId) // rotate it to the back of the queue; it is reported, never deleted
+        continue
+      }
+      if (!isTombstonePurgeEnabled(context.env)) break
+      // Every key is debited through the Worker's per-key deletion ledger,
+      // which the desktop's and web's own Worker DELETEs of the same keys
+      // share, so the bytes and the image are debited once whichever deletes
+      // first, for a release and a purge alike. The purge finalizer only
+      // marks the row purged.
+      try {
+        let logicalBytes = 0
+        if (keys.length) {
+          const userId = normalizeText(record.user_id)
+          if (!isValidTombstoneUuid(userId)) throw actionError(500, 'sweep_record_user_missing', 'Retirement record has no owner id')
+          if (!r2Client) {
+            const prepared = await r2ClientFactory(keys[0])
+            if (!prepared.ok) throw actionError(prepared.failure.status, prepared.failure.code, prepared.failure.message)
+            r2Client = prepared.client
+          }
+          const ledger = mediaDeleteLedger(context.adminClient, userId, keys)
+          const deletion = await r2Client.deleteObjects(ledger.keys, ledger.hooks)
+          logicalBytes = Number(deletion?.logicalBytes || 0)
+        }
+        // Finalize only a purge whose image row still exists and is not yet
+        // purged. A row removed by account deletion or an observation hard
+        // delete (ON DELETE CASCADE), or one already purged, needs no
+        // finalize: its keys are deleted and the record counts as done.
+        if (record.reason === 'purge' && record.image_exists !== false && !record.image_purged_at) {
+          const finalized = await callRpcWithRetry(context.adminClient, 'finalize_observation_image_purge', {
+            p_image_id: record.image_id,
+            p_purged_at: new Date().toISOString(),
+            p_storage_bytes: logicalBytes,
+          })
+          if (finalized.error) throw actionError(500, 'purge_finalize_failed', finalized.error.message || 'finalize failed')
+          const finalizedRow = Array.isArray(finalized.data) ? finalized.data[0] : finalized.data
+          if (finalizedRow?.quota_changed) counts.finalized += 1
+        }
+        counts.swept += 1
+        recordedIds.push(retirementId)
+        rows.push({ retirement_id: retirementId, image_id: record.image_id, reason: record.reason, status: 'swept', delete_targets: keys })
+      } catch (error) {
+        const failure = normalizeActionFailure(error)
+        counts.errors += 1
+        rows.push({ retirement_id: retirementId, image_id: record.image_id, reason: record.reason, status: 'error', error: failure.message })
+      }
+    }
+
+    if (recordedIds.length) {
+      const recorded = await callRpcWithRetry(context.adminClient, 'record_retired_key_sweep', { p_retirement_ids: recordedIds })
+      if (recorded.error) {
+        throw actionError(500, 'sweep_record_failed', `record_retired_key_sweep failed: ${recorded.error.message || recorded.error.code}`)
+      }
+    }
+    if (records.length < options.limit) break
+  }
+
+  return { counts, rows }
+}
+
+// ── Orphan prefix sweep ──────────────────────────────────────────────
+//
+// Deletes the media left under '<user_id>/' after an account is gone: a late
+// upload that landed after delete-account's last sweep (the Worker's
+// post-write profile check fails open on a lookup or delete error), or a
+// deletion run that got past delete_profile and was never retried.
+// public.media_prefix_owner_status (20261126130000) decides which prefixes
+// may be swept; nothing else is deleted. A prefix that another owner's row
+// still mentions in any key form (media_prefix_foreign_references) is left
+// for review. Per prefix: list the objects, check the owner again, then
+// delete exactly the listed objects, so an object written after the listing
+// is never touched and an owner that changed in between stops the delete;
+// list again afterwards and report 'incomplete' if anything is left.
+//
+// Dry run by default; it pages through the sweepable prefixes with `after`.
+// A real run also needs the tombstone purge switch and `user_ids`: the
+// prefixes to sweep, taken from a dry run's `would_delete` rows. Only those
+// are touched, and each must still be sweepable when the run reaches it, so
+// an approval covers exactly the prefixes the operator reviewed. A real run
+// is refused when any bucket holding user prefixes has none of a live
+// account: a database and a bucket of different environments (local
+// functions with production R2 keys, a private bucket setting of another
+// project) would otherwise classify every prefix in it as sweepable. No
+// quota accounting: the profile is gone.
+
+const ORPHAN_SWEEP_PREFIX_LIMIT_DEFAULT = 20
+const ORPHAN_SWEEP_PREFIX_LIMIT_MAX = 200
+const ORPHAN_SWEEP_OBJECT_BUDGET = 50_000
+const OWNER_STATUS_BATCH = 500
+
+export type OrphanSweepObject = { bucket: string; key: string; size: number }
+
+export type OrphanSweepR2Client = {
+  buckets: string[]
+  listTopLevelPrefixes: () => Promise<Array<{ bucket: string; name: string }>>
+  listObjects: (prefix: string) => Promise<OrphanSweepObject[]>
+  deleteObjects: (objects: OrphanSweepObject[]) => Promise<void>
+}
+
+type OwnerStatus = {
+  user_id: string
+  has_profile: boolean
+  has_auth_user: boolean
+  deletion_marked: boolean
+  sweepable: boolean
+}
+
+function isCanonicalUserPrefix(name: string) {
+  return isValidTombstoneUuid(name) && name === name.toLowerCase()
+}
+
+async function sweepOrphanMediaPrefixes(context: AdminActionContext): Promise<AdminActionResponse> {
+  const reason = requireNonEmptyText(context.requestBody?.reason, 'Reason is required')
+  if (!reason.ok) {
+    return actionFailureResponse(400, reason.code, reason.message)
+  }
+  const dryRun = context.requestBody?.dry_run !== false
+  if (!dryRun && !isTombstonePurgeEnabled(context.env)) {
+    return actionFailureResponse(409, TOMBSTONE_PURGE_DISABLED, 'Tombstone purge (and the orphan prefix sweep) is disabled on the server; a dry run is still allowed')
+  }
+  const limit = Math.min(ORPHAN_SWEEP_PREFIX_LIMIT_MAX, normalizePositiveInteger(context.requestBody?.limit, ORPHAN_SWEEP_PREFIX_LIMIT_DEFAULT))
+  const after = normalizeText(context.requestBody?.after) || null
+  if (after && !isCanonicalUserPrefix(after)) {
+    return actionFailureResponse(400, 'invalid_after', 'after must be a lowercase user id')
+  }
+  let userIds: string[] | null = null
+  if (!dryRun) {
+    const raw = context.requestBody?.user_ids
+    const list = Array.isArray(raw) ? [...new Set(raw.map(value => normalizeText(value)))] : []
+    if (!list.length || list.length > ORPHAN_SWEEP_PREFIX_LIMIT_MAX || !list.every(isCanonicalUserPrefix)) {
+      return actionFailureResponse(400, 'user_ids_required',
+        `A real run needs user_ids: 1-${ORPHAN_SWEEP_PREFIX_LIMIT_MAX} lowercase user ids from a dry run's would_delete rows`)
+    }
+    userIds = list
+  }
+
+  return await withAdminActionLog({
+    adminClient: context.adminClient,
+    adminUser: context.adminUser,
+    action: 'sweep_orphan_media_prefixes',
+    targetType: 'media_prefix_batch',
+    targetId: dryRun ? `dry_run:limit:${limit}:after:${after ?? ''}` : `user_ids:${userIds!.length}`,
+    reason: reason.value,
+    requestPayload: context.requestBody,
+    beforeSnapshot: { limit, dry_run: dryRun, after, user_ids: userIds },
+    run: async () => runOrphanPrefixSweep(context, { limit, dryRun, after, userIds }),
+  })
+}
+
+async function loadOwnerStatuses(adminClient: any, userIds: string[]): Promise<Map<string, OwnerStatus>> {
+  const statuses = new Map<string, OwnerStatus>()
+  for (let i = 0; i < userIds.length; i += OWNER_STATUS_BATCH) {
+    const batch = userIds.slice(i, i + OWNER_STATUS_BATCH)
+    const { data, error } = await callRpcWithRetry(adminClient, 'media_prefix_owner_status', { p_user_ids: batch })
+    if (error) {
+      throw actionError(500, 'owner_status_failed', `media_prefix_owner_status failed: ${error.message || error.code}`)
+    }
+    for (const row of Array.isArray(data) ? data : []) {
+      const id = normalizeText(row?.user_id).toLowerCase()
+      if (id) statuses.set(id, row as OwnerStatus)
+    }
+  }
+  return statuses
+}
+
+async function countForeignReferences(adminClient: any, userId: string): Promise<number> {
+  const { data, error } = await callRpcWithRetry(adminClient, 'media_prefix_foreign_references', { p_user_id: userId })
+  if (error) {
+    throw actionError(500, 'foreign_reference_check_failed', `media_prefix_foreign_references failed: ${error.message || error.code}`)
+  }
+  // A missing or malformed count must never read as "no references".
+  const count = typeof data === 'number' ? data : typeof data === 'string' && /^\d+$/.test(data) ? Number(data) : NaN
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw actionError(500, 'foreign_reference_check_failed', 'media_prefix_foreign_references returned no count')
+  }
+  return count
+}
+
+function ownerState(status: OwnerStatus | undefined): 'live' | 'sweepable' | 'needs_review' {
+  if (!status) return 'needs_review' // not classified: never deleted
+  if (status.has_profile) return 'live'
+  return status.sweepable === true ? 'sweepable' : 'needs_review'
+}
+
+export async function runOrphanPrefixSweep(
+  context: Pick<AdminActionContext, 'adminClient' | 'env'>,
+  options: { limit: number; dryRun: boolean; after?: string | null; userIds?: string[] | null },
+  clientFactory: (env: Record<string, string | undefined>) => OrphanSweepR2Client = createOrphanSweepR2Client,
+) {
+  const client = clientFactory(context.env)
+  const counts = {
+    prefixes_scanned: 0,
+    non_uuid_skipped: 0,
+    live: 0,
+    needs_review: 0,
+    sweepable: 0,
+    foreign_referenced: 0,
+    not_sweepable: 0,
+    would_delete: 0,
+    swept: 0,
+    partial: 0,
+    incomplete: 0,
+    owner_changed: 0,
+    errors: 0,
+    objects_deleted: 0,
+    bytes_deleted: 0,
+  }
+  const rows: Array<Record<string, unknown>> = []
+
+  const entries = await client.listTopLevelPrefixes()
+  const names = [...new Set(entries.map(entry => entry.name))]
+  counts.prefixes_scanned = names.length
+  // Only canonical lowercase user ids: other names (legacy folders, an id in
+  // another case) are not keys the app writes under '<user_id>/', so they are
+  // counted and left alone.
+  const canonical = names.filter(isCanonicalUserPrefix).sort()
+  counts.non_uuid_skipped = names.length - canonical.length
+
+  const statuses = await loadOwnerStatuses(context.adminClient, canonical)
+  const sweepable: string[] = []
+  for (const userId of canonical) {
+    const state = ownerState(statuses.get(userId))
+    if (state === 'live') counts.live += 1
+    else if (state === 'needs_review') {
+      counts.needs_review += 1
+      const status = statuses.get(userId)
+      rows.push({
+        user_id: userId,
+        status: 'needs_review',
+        has_auth_user: status?.has_auth_user ?? null,
+        deletion_marked: status?.deletion_marked ?? null,
+      })
+    } else sweepable.push(userId)
+  }
+  counts.sweepable = sweepable.length
+
+  // Environment check per bucket: every bucket that holds user prefixes must
+  // hold at least one of a live account.
+  const bucketsWithoutLive: string[] = []
+  for (const bucket of client.buckets) {
+    const own = entries.filter(entry => entry.bucket === bucket && isCanonicalUserPrefix(entry.name))
+    if (own.length && !own.some(entry => ownerState(statuses.get(entry.name)) === 'live')) bucketsWithoutLive.push(bucket)
+  }
+  if (!options.dryRun && bucketsWithoutLive.length) {
+    throw actionError(409, 'no_live_prefixes',
+      `No media prefix in ${bucketsWithoutLive.join(', ')} belongs to a live account; that bucket and the database may be of different environments`,
+      { counts, buckets_without_live: bucketsWithoutLive })
+  }
+
+  // Dry run: the next page of sweepable prefixes after `after`. Real run:
+  // exactly the requested prefixes; one that is not sweepable now is
+  // reported and left alone.
+  let targets: string[] = []
+  let nextAfter: string | null = null
+  if (options.dryRun) {
+    const remaining = sweepable.filter(id => !options.after || id > options.after)
+    targets = remaining.slice(0, options.limit)
+    if (remaining.length > targets.length) nextAfter = targets[targets.length - 1] ?? null
+  } else {
+    const sweepableSet = new Set(sweepable)
+    const present = new Set(canonical)
+    for (const userId of options.userIds ?? []) {
+      if (sweepableSet.has(userId)) targets.push(userId)
+      else {
+        counts.not_sweepable += 1
+        rows.push({ user_id: userId, status: 'not_sweepable', owner: present.has(userId) ? ownerState(statuses.get(userId)) : 'no_prefix' })
+      }
+    }
+    targets = targets.slice(0, options.limit)
+  }
+
+  let objectBudget = ORPHAN_SWEEP_OBJECT_BUDGET
+  for (const userId of targets) {
+    if (!options.dryRun && objectBudget <= 0) break
+    const prefix = `${userId}/`
+    try {
+      const listed = (await client.listObjects(prefix)).filter(object => object.key.startsWith(prefix))
+      const foreign = await countForeignReferences(context.adminClient, userId)
+      if (foreign > 0) {
+        counts.foreign_referenced += 1
+        rows.push({ user_id: userId, status: 'needs_review', foreign_references: foreign, objects: listed.length })
+        continue
+      }
+      const bytesOf = (list: OrphanSweepObject[]) => list.reduce((sum, object) => sum + Math.max(0, Number(object.size) || 0), 0)
+      if (options.dryRun) {
+        counts.would_delete += 1
+        rows.push({ user_id: userId, status: 'would_delete', objects: listed.length, bytes: bytesOf(listed), buckets: [...new Set(listed.map(o => o.bucket))] })
+        continue
+      }
+      // Re-check after listing: only objects listed while the account was
+      // still gone are deleted.
+      const recheck = ownerState((await loadOwnerStatuses(context.adminClient, [userId])).get(userId))
+      if (recheck !== 'sweepable') {
+        counts.owner_changed += 1
+        rows.push({ user_id: userId, status: 'owner_changed', owner: recheck })
+        continue
+      }
+      // A prefix over the remaining budget is deleted in part; the next run
+      // continues it. The budget is charged before the delete, so a failed
+      // delete still counts against it.
+      const batch = listed.slice(0, objectBudget)
+      objectBudget -= batch.length
+      await client.deleteObjects(batch)
+      counts.objects_deleted += batch.length
+      counts.bytes_deleted += bytesOf(batch)
+      const left = (await client.listObjects(prefix)).filter(object => object.key.startsWith(prefix)).length
+      let status = 'swept'
+      if (batch.length < listed.length) status = 'partial'
+      else if (left > 0) status = 'incomplete'
+      if (status === 'swept') counts.swept += 1
+      else if (status === 'partial') counts.partial += 1
+      else counts.incomplete += 1
+      rows.push({ user_id: userId, status, objects: batch.length, bytes: bytesOf(batch), objects_left: left })
+    } catch (error) {
+      const failure = normalizeActionFailure(error)
+      counts.errors += 1
+      rows.push({ user_id: userId, status: 'error', error: failure.message })
+    }
+  }
+
+  // complete (real run): every requested prefix was swept or deliberately
+  // left alone, and nothing failed or is left behind. Otherwise run it again.
+  const settled = counts.swept + counts.owner_changed + counts.foreign_referenced + counts.not_sweepable
+  const complete = !options.dryRun
+    && counts.errors === 0 && counts.partial === 0 && counts.incomplete === 0
+    && settled >= (options.userIds ?? []).length
+  return {
+    dry_run: options.dryRun,
+    complete,
+    next_after: nextAfter,
+    buckets: client.buckets,
+    buckets_without_live: bucketsWithoutLive,
+    counts,
+    rows,
+  }
+}
+
+// S3-compatible listing client for the orphan sweep. Unlike createR2Client it
+// needs R2_PRIVATE_BUCKET_NAME set (a bucket name or 'none'): a sweep that
+// silently skipped the private bucket would report a clean result.
+export function createOrphanSweepR2Client(env: Record<string, string | undefined>): OrphanSweepR2Client {
+  const accessKeyId = normalizeText(env.R2_ACCESS_KEY_ID)
+  const secretAccessKey = normalizeText(env.R2_SECRET_ACCESS_KEY)
+  const endpoint = normalizeText(env.R2_S3_ENDPOINT).replace(/\/+$/, '')
+  if (!accessKeyId || !secretAccessKey || !endpoint) {
+    throw actionError(500, 'missing_r2_configuration', 'R2 is not configured')
+  }
+  const privateSetting = parsePrivateBucketSetting(env.R2_PRIVATE_BUCKET_NAME)
+  if (!privateSetting.configured) {
+    throw actionError(500, 'missing_r2_configuration', 'R2_PRIVATE_BUCKET_NAME must be set (the bucket name or none)')
+  }
+  const legacy = normalizeText(env.R2_BUCKET_NAME) || R2_BUCKET_NAME
+  const buckets = [...new Set([legacy, privateSetting.bucket].filter((b): b is string => Boolean(b)))]
+  const s3 = new S3Client({ region: R2_REGION, endpoint, credentials: { accessKeyId, secretAccessKey } })
+
+  return {
+    buckets,
+    async listTopLevelPrefixes() {
+      const entries = new Map<string, { bucket: string; name: string }>()
+      try {
+        for (const bucket of buckets) {
+          let token: string | undefined
+          do {
+            const page = await s3.send(new ListObjectsV2Command({ Bucket: bucket, Delimiter: '/', ContinuationToken: token, MaxKeys: 1000 }))
+            for (const entry of page.CommonPrefixes ?? []) {
+              const name = String(entry.Prefix ?? '').replace(/\/$/, '')
+              if (name) entries.set(`${bucket}/${name}`, { bucket, name })
+            }
+            token = page.IsTruncated ? page.NextContinuationToken : undefined
+          } while (token)
+        }
+      } catch (error) {
+        const failure = normalizeR2SdkFailure(error, 'R2 list failed')
+        throw actionError(failure.status, 'r2_list_failed', failure.message)
+      }
+      return [...entries.values()]
+    },
+    async listObjects(prefix: string) {
+      if (!/^[0-9a-f-]{36}\/$/.test(prefix)) throw actionError(400, 'invalid_prefix', 'Refusing to list a prefix that is not <user_id>/')
+      const objects: OrphanSweepObject[] = []
+      try {
+        for (const bucket of buckets) {
+          let token: string | undefined
+          do {
+            const page = await s3.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: token, MaxKeys: 1000 }))
+            for (const item of page.Contents ?? []) {
+              if (item.Key) objects.push({ bucket, key: item.Key, size: Number(item.Size ?? 0) })
+            }
+            token = page.IsTruncated ? page.NextContinuationToken : undefined
+          } while (token)
+        }
+      } catch (error) {
+        const failure = normalizeR2SdkFailure(error, 'R2 list failed')
+        throw actionError(failure.status, 'r2_list_failed', failure.message)
+      }
+      return objects
+    },
+    async deleteObjects(objects: OrphanSweepObject[]) {
+      for (const bucket of buckets) {
+        const keys = objects.filter(object => object.bucket === bucket).map(object => object.key)
+        for (let i = 0; i < keys.length; i += 1000) {
+          let errors = 0
+          try {
+            const result = await s3.send(new DeleteObjectsCommand({
+              Bucket: bucket,
+              Delete: { Objects: keys.slice(i, i + 1000).map(Key => ({ Key })), Quiet: true },
+            }))
+            errors = result.Errors?.length ?? 0
+          } catch (error) {
+            const failure = normalizeR2SdkFailure(error, 'R2 delete failed')
+            throw actionError(failure.status, 'r2_delete_failed', failure.message)
+          }
+          if (errors) throw actionError(502, 'r2_delete_partial_failure', `${errors} delete error(s) in ${bucket}; retry the sweep`)
+        }
+      }
+    },
   }
 }
 
@@ -1334,6 +1951,16 @@ export function getRestoreWindowDays(
   return DEFAULT_TOMBSTONE_RESTORE_WINDOW_DAYS
 }
 
+export const TOMBSTONE_PURGE_DISABLED = 'tombstone_purge_disabled'
+
+// Fail closed: the destructive tombstone purge runs only when the server-side
+// secret ADMIN_TOMBSTONE_PURGE_ENABLED is exactly "true". Absent, empty or any
+// other value disables it. Re-enable only after claim-aware admin-ops (plan
+// Stage 0a item 8 / rollout step 4) is deployed and verified.
+export function isTombstonePurgeEnabled(env: Record<string, string | undefined> | null | undefined): boolean {
+  return String(env?.ADMIN_TOMBSTONE_PURGE_ENABLED ?? '').trim() === 'true'
+}
+
 function getPurgeCutoffAt(restoreWindowDays: number) {
   const safeDays = Number.isFinite(restoreWindowDays) && restoreWindowDays > 0 ? restoreWindowDays : DEFAULT_TOMBSTONE_RESTORE_WINDOW_DAYS
   return new Date(Date.now() - safeDays * 24 * 60 * 60 * 1000)
@@ -1373,6 +2000,19 @@ function stripLegacyVariantPrefixes(fileName: string) {
 
 function normalizeMediaKey(value: unknown) {
   return normalizeText(value).replace(/^\/+/, '')
+}
+
+// Retirement delete_keys are stored already normalized by SQL. Keep each
+// key byte-for-byte; any value normalizeMediaKey would change (or a
+// non-string) is counted as rejected so the caller deletes nothing.
+export function canonicalDeleteKeys(values: unknown): { keys: string[]; rejected: number } {
+  const keys: string[] = []
+  let rejected = 0
+  for (const value of Array.isArray(values) ? values : []) {
+    if (typeof value === 'string' && value.length > 0 && normalizeMediaKey(value) === value) keys.push(value)
+    else rejected += 1
+  }
+  return { keys, rejected }
 }
 
 function normalizeRecord(value: unknown) {
@@ -1693,12 +2333,14 @@ async function safeCountRows(adminClient: any, table: string, applyFilter?: (que
   }
 }
 
-function createR2Client(env: Record<string, string | undefined>) {
+export function createR2Client(env: Record<string, string | undefined>) {
   const accessKeyId = normalizeText(env.R2_ACCESS_KEY_ID)
   const secretAccessKey = normalizeText(env.R2_SECRET_ACCESS_KEY)
   const s3Endpoint = normalizeText(env.R2_S3_ENDPOINT).replace(/\/+$/, '')
   const legacyBucketName = normalizeText(env.R2_BUCKET_NAME) || R2_BUCKET_NAME
-  const privateBucketName = normalizeText(env.R2_PRIVATE_BUCKET_NAME)
+  // Shared with delete-account: 'none' means the Worker binds no private
+  // bucket; unset keeps the legacy bucket only (as before).
+  const privateBucketName = parsePrivateBucketSetting(env.R2_PRIVATE_BUCKET_NAME).bucket ?? ''
 
   if (!accessKeyId || !secretAccessKey || !s3Endpoint) {
     throw actionError(500, 'missing_r2_configuration', 'R2 purge is not configured')
@@ -1723,6 +2365,73 @@ async function prepareR2PurgeClient(env: Record<string, string | undefined>, pre
       failure: normalizeActionFailure(error),
     }
   }
+}
+
+export type MediaDeleteHooks = {
+  beforeDelete?: (key: string, snapshot: { bytes: number; held: boolean }) => Promise<void>
+  afterDelete?: (key: string, snapshot: { bytes: number; held: boolean }) => Promise<void>
+}
+
+// Mirrors isPrimaryImageKey in cloudflare/r2-upload-worker/src/index.js: the
+// key of a logical observation image (not a thumb, an original or a mosaic).
+export function isPrimaryMediaKey(key: string): boolean {
+  const normalized = String(key || '').replace(/^\/+/, '')
+  const filename = normalized.split('/').pop() || ''
+  if (!filename || filename.startsWith('thumb_')) return false
+  if (normalized.includes('/originals/')) return false
+  if (/^spore_mosaic(?:_|\.)/i.test(filename)) return false
+  return true
+}
+
+const MEDIA_VARIANT_PREFIX = /^(?:thumb_|small_|medium_|cards_|preview_)/
+
+// Quota debits for raw key deletes go through the Worker's per-key ledger
+// (public.prepare_media_object_deletion / finalize_media_object_deletion),
+// with the size measured in R2 just before the delete. The ledger keeps one
+// row per (user, key), so the sweep and the desktop's Worker DELETE of the
+// same key debit once between them: whichever runs second finds the object
+// gone, prepares 0 bytes and finalizes nothing new. If both measured the
+// object before either deleted it, the second prepare does not re-open the
+// first one's finalized entry, because the key is retired (20261126120000
+// section 13). A crash or a partial bucket failure between the delete and
+// the finalize is finished by the next attempt, because prepare keeps the
+// larger earlier snapshot of each key until its row is finalized.
+//
+// The image is debited only on the family's unprefixed primary key (not a
+// small_/medium_/cards_/preview_ copy), so at most one image per family, on
+// every attempt and whichever of the sweep and the Worker deletes that key.
+// If that key is already gone the image is not debited again here; a
+// family whose only primary object was a prefixed copy keeps its image
+// count until recalculate_profile_storage_usage (the safe direction).
+export function isImageLedgerKey(key: string): boolean {
+  return isPrimaryMediaKey(key) && !MEDIA_VARIANT_PREFIX.test(key.split('/').pop() || '')
+}
+
+export function mediaDeleteLedger(adminClient: any, userId: string, keys: string[]) {
+  const hooks: MediaDeleteHooks = {
+    beforeDelete: async (key, { bytes, held }) => {
+      const imageCount = held && isImageLedgerKey(key) ? 1 : 0
+      const { error } = await callRpcWithRetry(adminClient, 'prepare_media_object_deletion', {
+        p_user_id: userId,
+        p_storage_key: key,
+        p_storage_bytes: Math.max(0, Math.trunc(bytes)),
+        p_image_count: imageCount,
+      })
+      if (error) {
+        throw actionError(500, 'media_delete_accounting_prepare_failed', error.message || 'prepare_media_object_deletion failed')
+      }
+    },
+    afterDelete: async key => {
+      const { error } = await callRpcWithRetry(adminClient, 'finalize_media_object_deletion', {
+        p_user_id: userId,
+        p_storage_key: key,
+      })
+      if (error) {
+        throw actionError(500, 'media_delete_accounting_finalize_failed', error.message || 'finalize_media_object_deletion failed')
+      }
+    },
+  }
+  return { keys, hooks }
 }
 
 export class R2MultiBucketClient {
@@ -1771,7 +2480,11 @@ export class R2MultiBucketClient {
     }
   }
 
-  async deleteObjects(keys: Iterable<string>) {
+  // hooks.beforeDelete runs once per key after every bucket was inspected and
+  // before any delete of that key; a throw skips the key's delete. Hooks
+  // .afterDelete runs only when the key is gone from every bucket. Both get
+  // the key's logical size (the largest copy) and whether any copy existed.
+  async deleteObjects(keys: Iterable<string>, hooks: MediaDeleteHooks = {}) {
     const cleaned = [...new Set([...keys].map(key => normalizeMediaKey(key)).filter(Boolean))]
     let logicalBytes = 0
     const targets: Array<Record<string, unknown>> = []
@@ -1789,7 +2502,22 @@ export class R2MultiBucketClient {
         }
         continue
       }
-      logicalBytes += Math.max(0, ...heads.map(result => result.ok ? Number(result.size || 0) : 0))
+      const snapshot = {
+        bytes: Math.max(0, ...heads.map(result => result.ok ? Number(result.size || 0) : 0)),
+        held: heads.some(result => result.ok),
+      }
+      logicalBytes += snapshot.bytes
+
+      if (hooks.beforeDelete) {
+        try {
+          await hooks.beforeDelete(key, snapshot)
+        } catch (error) {
+          const failure = normalizeActionFailure(error)
+          firstFailure ??= failure
+          targets.push({ key, role: 'all', operation: 'accounting_prepare', ok: false, error: failure.message })
+          continue
+        }
+      }
 
       const deletes = await Promise.all(this.clients.map(async client => {
         try {
@@ -1802,6 +2530,16 @@ export class R2MultiBucketClient {
         }
       }))
       targets.push(...deletes)
+
+      if (hooks.afterDelete && deletes.every(result => result.ok)) {
+        try {
+          await hooks.afterDelete(key, snapshot)
+        } catch (error) {
+          const failure = normalizeActionFailure(error)
+          firstFailure ??= failure
+          targets.push({ key, role: 'all', operation: 'accounting_finalize', ok: false, error: failure.message })
+        }
+      }
     }
 
     if (firstFailure) {

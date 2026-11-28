@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs'
 
 import {
   SNAPSHOT_PAGE_SIZE,
+  CONTENT_RERUN_DELAY_MS,
+  CONTENT_RERUN_FROM,
   R2_DELETE_CONCURRENCY,
   SWEEP_MAX_CALLS,
   requireSuccess,
@@ -15,13 +17,19 @@ import {
 } from './plan.js'
 
 const UID = '00000000-0000-4000-8000-000000000001'
+const SIGN_OUT = async () => ({ error: null })
 
 // ── Structural: every stage matches the audited deletion order ────────
 
 const EXPECTED_ORDER = [
   'sweep_preflight',
+  'check_r2_configuration',
+  'sign_out_everywhere',
+  'begin_account_deletion',
   'media_snapshot',
   'mosaic_media_snapshot',
+  'calibration_media_snapshot',
+  'delete_r2_prefix',
   'delete_r2_media',
   'delete_legacy_storage',
   'scrub_mentions',
@@ -41,6 +49,9 @@ const EXPECTED_ORDER = [
   'delete_observation_images',
   'delete_observations',
   'delete_calibrations',
+  'delete_r2_prefix_second_pass',
+  'verify_r2_prefix_empty',
+  'erase_media_retirements',
   'delete_profile',
   'sweep_r2_prefix',
   'delete_auth_user',
@@ -231,6 +242,7 @@ function fakeAdmin(overrides = {}) {
       calls.push({ table: '<rpc>', op: name, params })
       const override = overrides.rpcResponses?.[name]
       if (override) return Promise.resolve(override(params))
+      if (name === 'begin_account_deletion') return Promise.resolve({ data: { status: 'fenced' }, error: null })
       return Promise.resolve({ data: null, error: null })
     },
     storage: overrides.storage || {
@@ -247,6 +259,44 @@ function fakeAdmin(overrides = {}) {
           return { data: null, error: null }
         },
       },
+    },
+  }
+}
+
+// Fake two-bucket R2 (legacy + private) with S3-style prefix listing.
+function fakeR2(initial = {}, options = {}) {
+  const buckets = { legacy: new Set(initial.legacy || []), private: new Set(initial.private || []) }
+  const log = []
+  return {
+    buckets,
+    log,
+    async listObjects(prefix) {
+      log.push(`list:${prefix}`)
+      if (options.listError) return { ok: false, error: options.listError }
+      const objects = []
+      for (const [bucket, keys] of Object.entries(buckets)) {
+        for (const key of keys) if (key.startsWith(prefix)) objects.push({ bucket, key })
+      }
+      return { ok: true, objects }
+    },
+    async probeDelete(prefix) {
+      log.push(`probe:${prefix}`)
+      if (options.probeError) return { ok: false, error: options.probeError }
+      return { ok: true }
+    },
+    async deleteObjects(objects) {
+      log.push(`delete:${objects.length}`)
+      if (options.deleteError) return { ok: false, error: options.deleteError }
+      for (const o of objects) {
+        if (options.sticky?.includes(o.key)) continue  // simulates an object that never goes away
+        buckets[o.bucket].delete(o.key)
+      }
+      // A racing upload lands right after the first prefix delete.
+      if (options.raceAfterFirstDelete && !this._raced) {
+        this._raced = true
+        buckets.private.add(options.raceAfterFirstDelete)
+      }
+      return { ok: true }
     },
   }
 }
@@ -287,7 +337,7 @@ test('runDeletionPlan: happy path completes every stage', async () => {
     },
   })
   const worker = fakeWorker()
-  const result = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+  const result = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(result.ok, true)
   assert.deepEqual(result.completed, EXPECTED_ORDER)
   // Snapshotted R2 keys were forwarded to the worker.
@@ -306,7 +356,7 @@ test('runDeletionPlan: failure at any stage stops progress and leaves auth user 
     },
   })
   const worker = fakeWorker()
-  const result = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+  const result = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(result.ok, false)
   assert.equal(result.stage, 'delete_observations')
   assert.ok(result.error.includes('FK violation'))
@@ -340,7 +390,7 @@ test('runDeletionPlan: staged failure at every stage leaves auth user alive', as
       tableResponses: { [table]: { delete: () => ({ data: null, error: { message: 'induced' } }) } },
     })
     const worker = fakeWorker()
-    const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+    const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
     assert.equal(r.ok, false, `${stageName} should fail`)
     assert.equal(r.stage, stageName, `${stageName} stage label should be reported`)
     const authCall = admin._calls.find(c => c.op === 'deleteUser')
@@ -354,7 +404,7 @@ test('runDeletionPlan: reference-library RPC failure stops before observations a
       delete_reference_library_for_account: () => ({ data: null, error: { message: 'reference delete failed' } }),
     },
   })
-  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set() })
+  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(result.ok, false)
   assert.equal(result.stage, 'delete_reference_library_for_account')
   assert.match(result.error, /reference delete failed/)
@@ -364,7 +414,7 @@ test('runDeletionPlan: reference-library RPC failure stops before observations a
 
 test('reference-library deletion calls the service-role RPC with the account uid', async () => {
   const admin = fakeAdmin()
-  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set() })
+  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(result.ok, true)
   const calls = admin._calls.filter(
     c => c.table === '<rpc>' && c.op === 'delete_reference_library_for_account',
@@ -375,8 +425,8 @@ test('reference-library deletion calls the service-role RPC with the account uid
 test('reference-library deletion is retry-safe at the plan boundary', async () => {
   const admin = fakeAdmin()
   const worker = fakeWorker()
-  const first = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
-  const second = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+  const first = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
+  const second = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(first.ok, true)
   assert.equal(second.ok, true)
   assert.equal(
@@ -392,7 +442,7 @@ test('runDeletionPlan: media_snapshot failure prevents downstream deletes', asyn
     },
   })
   const worker = fakeWorker()
-  const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+  const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(r.ok, false)
   assert.equal(r.stage, 'media_snapshot')
   // Worker never invoked because snapshot never populated r2Keys.
@@ -406,7 +456,7 @@ test('runDeletionPlan: R2 404 is treated as idempotent success', async () => {
     },
   })
   const worker = fakeWorker({ statusByKey: { [`${UID}/gone.jpg`]: 404, [`${UID}/thumb_gone.jpg`]: 404 } })
-  const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+  const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(r.ok, true)
 })
 
@@ -417,7 +467,7 @@ test('runDeletionPlan: R2 500 fails the stage and preserves the auth user', asyn
     },
   })
   const worker = fakeWorker({ statusByKey: { [`${UID}/x.jpg`]: 500 } })
-  const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+  const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(r.ok, false)
   assert.equal(r.stage, 'delete_r2_media')
   assert.deepEqual(worker.deleted, [
@@ -528,7 +578,7 @@ test('delete_r2_media records a thrown worker error as a failure and keeps going
 test('runDeletionPlan: delete_auth_user user_not_found is idempotent success', async () => {
   const admin = fakeAdmin({ deleteUserError: 'User not found' })
   const worker = fakeWorker()
-  const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+  const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(r.ok, true)
   assert.equal(r.completed[r.completed.length - 1], 'delete_auth_user')
 })
@@ -538,13 +588,13 @@ test('runDeletionPlan: SECOND run after partial cleanup succeeds (idempotency)',
   const admin1 = fakeAdmin({
     tableResponses: { observations: { delete: () => ({ data: null, error: { message: 'network flake' } }) } },
   })
-  const r1 = await runDeletionPlan({ uid: UID, admin: admin1, worker: fakeWorker(), r2Keys: new Set() })
+  const r1 = await runDeletionPlan({ uid: UID, admin: admin1, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(r1.ok, false)
 
   // Second run: no failures. Every stage's `WHERE user_id = uid` matches
   // zero rows (already deleted) but succeeds. Auth user delete now runs.
   const admin2 = fakeAdmin()
-  const r2 = await runDeletionPlan({ uid: UID, admin: admin2, worker: fakeWorker(), r2Keys: new Set() })
+  const r2 = await runDeletionPlan({ uid: UID, admin: admin2, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(r2.ok, true)
   assert.deepEqual(r2.completed, EXPECTED_ORDER)
 })
@@ -553,7 +603,7 @@ test('runDeletionPlan: SECOND run after partial cleanup succeeds (idempotency)',
 
 test('delete_follows queries BOTH user_id and target_id (polymorphic)', async () => {
   const admin = fakeAdmin()
-  await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set() })
+  await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   const followsCalls = admin._calls.filter(c => c.table === 'follows' && c.op === 'delete')
   const cols = followsCalls.flatMap(c => c.filters.filter(f => f.method === 'eq').map(f => f.col))
   assert.ok(cols.includes('user_id'))
@@ -562,7 +612,7 @@ test('delete_follows queries BOTH user_id and target_id (polymorphic)', async ()
 
 test('delete_user_blocks queries BOTH blocker_id and blocked_id', async () => {
   const admin = fakeAdmin()
-  await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set() })
+  await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   const cols = admin._calls
     .filter(c => c.table === 'user_blocks' && c.op === 'delete')
     .flatMap(c => c.filters.filter(f => f.method === 'eq').map(f => f.col))
@@ -572,7 +622,7 @@ test('delete_user_blocks queries BOTH blocker_id and blocked_id', async () => {
 
 test('delete_friendships uses an OR filter on requester_id/addressee_id', async () => {
   const admin = fakeAdmin()
-  await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set() })
+  await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   const call = admin._calls.find(c => c.table === 'friendships' && c.op === 'delete')
   const orFilter = call.filters.find(f => f.method === 'or')
   assert.match(orFilter.expr, /requester_id\.eq/)
@@ -581,7 +631,7 @@ test('delete_friendships uses an OR filter on requester_id/addressee_id', async 
 
 test('delete_reports queries reporter_id AND reported_user_id', async () => {
   const admin = fakeAdmin()
-  await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set() })
+  await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   const cols = admin._calls
     .filter(c => c.table === 'reports' && c.op === 'delete')
     .flatMap(c => c.filters.filter(f => f.method === 'eq').map(f => f.col))
@@ -597,7 +647,7 @@ test('scrub_mentions is best-effort: failure does not abort the plan', async () 
       },
     },
   })
-  const r = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set() })
+  const r = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   // Should still succeed overall.
   assert.equal(r.ok, true)
 })
@@ -663,7 +713,7 @@ test('media_snapshot: original_storage_path is added AS-IS (no thumb_ variant)',
   })
   const worker = fakeWorker()
   const r2Keys = new Set()
-  await runDeletionPlan({ uid: UID, admin, worker, r2Keys })
+  await runDeletionPlan({ uid: UID, admin, worker, r2Keys, r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   // storage_path variant has a paired thumb, by contract.
   assert.ok(r2Keys.has(`${UID}/o1/photo.jpg`))
   assert.ok(r2Keys.has(`${UID}/o1/thumb_photo.jpg`))
@@ -689,7 +739,7 @@ test('media_snapshot: original_storage_path missing/null is tolerated', async ()
   })
   const worker = fakeWorker()
   const r2Keys = new Set()
-  const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys })
+  const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys, r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(r.ok, true)
   assert.ok(r2Keys.has(`${UID}/a/photo.jpg`))
   assert.ok(r2Keys.has(`${UID}/b/photo.jpg`))
@@ -713,7 +763,7 @@ test('mosaic_media_snapshot: storage_key rows are collected before delete_mosaic
   })
   const worker = fakeWorker()
   const r2Keys = new Set()
-  await runDeletionPlan({ uid: UID, admin, worker, r2Keys })
+  await runDeletionPlan({ uid: UID, admin, worker, r2Keys, r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.ok(r2Keys.has(`${UID}/mosaics/m1.webp`))
   assert.ok(r2Keys.has(`${UID}/mosaics/m2.webp`))
   // Not manufactured with a thumb_ companion — mosaics have no thumb pair.
@@ -732,7 +782,7 @@ test('mosaic_media_snapshot: select failure aborts the plan', async () => {
     },
   })
   const worker = fakeWorker()
-  const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+  const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(r.ok, false)
   assert.equal(r.stage, 'mosaic_media_snapshot')
   assert.equal(admin._calls.find(c => c.op === 'deleteUser'), undefined)
@@ -742,7 +792,7 @@ test('mosaic_media_snapshot: select failure aborts the plan', async () => {
 
 test('scrub_mentions: uses the scrub_user_mentions RPC with the deleted uid', async () => {
   const admin = fakeAdmin()
-  await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set() })
+  await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   const rpc = admin._calls.find(c => c.table === '<rpc>' && c.op === 'scrub_user_mentions')
   assert.ok(rpc, 'scrub_user_mentions RPC must be called')
   assert.deepEqual(rpc.params, { p_user_id: UID })
@@ -787,7 +837,7 @@ test('scrub_mentions: RPC failure does NOT abort the plan', async () => {
   const admin = fakeAdmin({
     rpcResponses: { scrub_user_mentions: () => ({ data: null, error: { message: 'rpc failed' } }) },
   })
-  const r = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set() })
+  const r = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(r.ok, true)
 })
 
@@ -795,7 +845,7 @@ test('scrub_mentions: RPC failure does NOT abort the plan', async () => {
 
 test('delete_follows.target_id: also filters by target_type=user (polymorphic guard)', async () => {
   const admin = fakeAdmin()
-  await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set() })
+  await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   const followsCalls = admin._calls.filter(c => c.table === 'follows' && c.op === 'delete')
   // Two delete calls: one for user_id, one for (target_type + target_id).
   // Find the target_id call and confirm its filters include target_type.
@@ -820,6 +870,228 @@ test('STRUCTURAL: delete_follows source uses target_type + target_id together, n
   const bareMatches = followsBlock.match(bareTargetId) || []
   assert.equal(bareMatches.length, targetIdCalls.length,
     'every follows.target_id filter must be preceded by target_type=user')
+})
+
+// ── R2 prefix deletion, calibration media and registry erasure ─────────
+
+test('prefix deletion empties BOTH buckets, including keys no row references', async () => {
+  const r2 = fakeR2({
+    legacy: [`${UID}/a.webp`, `${UID}/thumb_a.webp`, `${UID}/released/thumb_medium_x.webp`, 'other-user/keep.webp'],
+    private: [`${UID}/originals/1/a.jpg`, `${UID}/late-worker-write.webp`],
+  })
+  const result = await runDeletionPlan({ uid: UID, admin: fakeAdmin(), worker: fakeWorker(), r2Keys: new Set(), r2, signOutEverywhere: SIGN_OUT })
+  assert.equal(result.ok, true)
+  assert.deepEqual([...r2.buckets.legacy], ['other-user/keep.webp'])
+  assert.deepEqual([...r2.buckets.private], [])
+  assert.ok(r2.log.every(entry => !entry.startsWith('list:') || entry === `list:${UID}/`))
+})
+
+test('second prefix pass removes an upload that raced the first pass', async () => {
+  const late = `${UID}/raced-upload.webp`
+  const r2 = fakeR2({ legacy: [`${UID}/a.webp`] }, { raceAfterFirstDelete: late })
+  const result = await runDeletionPlan({ uid: UID, admin: fakeAdmin(), worker: fakeWorker(), r2Keys: new Set(), r2, signOutEverywhere: SIGN_OUT })
+  assert.equal(result.ok, true)
+  assert.equal(r2.buckets.private.has(late), false)
+  assert.ok(r2.log.filter(e => e.startsWith('delete:')).length >= 2)
+})
+
+test('a non-empty prefix after the second pass stops the run before erasure, profile and auth deletion', async () => {
+  const sticky = `${UID}/stuck.webp`
+  const admin = fakeAdmin()
+  const r2 = fakeR2({ private: [sticky] }, { sticky: [sticky] })
+  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2, signOutEverywhere: SIGN_OUT })
+  assert.equal(result.ok, false)
+  assert.ok(['delete_r2_prefix', 'verify_r2_prefix_empty'].includes(result.stage))
+  assert.equal(admin._calls.some(c => c.op === 'deleteUser'), false)
+  assert.equal(admin._calls.some(c => c.op === 'erase_media_retirements' || c.op === 'erase_account_media_retirements'), false)
+  assert.equal(admin._calls.some(c => c.table === 'profiles'), false)
+})
+
+test('an R2 listing error or a missing R2 client fails before the sign-out and the fence', async () => {
+  for (const r2 of [fakeR2({}, { listError: 'denied' }), undefined]) {
+    const admin = fakeAdmin()
+    let signedOut = false
+    const result = await runDeletionPlan({
+      uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2,
+      signOutEverywhere: async () => { signedOut = true; return { error: null } },
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.stage, 'check_r2_configuration')
+    assert.equal(signedOut, false, 'no sign-out before the R2 check passes')
+    assert.equal(admin._calls.length, 0, 'no fence, snapshot or delete before the R2 check passes')
+    if (!r2) assert.match(result.error, /not configured/)
+  }
+})
+
+
+test('a list-only R2 token fails the delete check before the sign-out and the fence', async () => {
+  const admin = fakeAdmin()
+  let signedOut = false
+  const r2 = fakeR2({ legacy: [`${UID}/a.webp`] }, { probeError: 'delete not permitted in sporely-media' })
+  const result = await runDeletionPlan({
+    uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2,
+    signOutEverywhere: async () => { signedOut = true; return { error: null } },
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.stage, 'check_r2_configuration')
+  assert.match(result.error, /delete check failed/)
+  assert.equal(signedOut, false)
+  assert.equal(admin._calls.length, 0)
+  assert.deepEqual(r2.log, [`list:${UID}/`, `probe:${UID}/`])
+  assert.deepEqual([...r2.buckets.legacy], [`${UID}/a.webp`])
+})
+test('a non-uuid account id never produces a prefix (cannot widen to a whole bucket)', async () => {
+  const r2 = fakeR2({ legacy: ['x/a.webp'] })
+  const result = await runDeletionPlan({ uid: '', admin: fakeAdmin(), worker: fakeWorker(), r2Keys: new Set(), r2, signOutEverywhere: SIGN_OUT })
+  assert.equal(result.ok, false)
+  assert.deepEqual([...r2.buckets.legacy], ['x/a.webp'])
+})
+
+test('calibration images are snapshotted and deleted', async () => {
+  const admin = fakeAdmin({
+    tableResponses: {
+      calibrations: { select: () => ({ data: [{ image_storage_path: `${UID}/calibration/cal1.jpg` }], error: null }) },
+    },
+  })
+  const worker = fakeWorker()
+  const result = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
+  assert.equal(result.ok, true)
+  assert.ok(worker.deleted.includes(`${UID}/calibration/cal1.jpg`))
+})
+
+test('registry erasure runs after the prefix is verified empty and before profile and auth deletion', async () => {
+  const admin = fakeAdmin()
+  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
+  assert.equal(result.ok, true)
+  const erase = admin._calls.findIndex(c => c.op === 'erase_account_media_retirements')
+  const profile = admin._calls.findIndex(c => c.table === 'profiles')
+  const auth = admin._calls.findIndex(c => c.op === 'deleteUser')
+  assert.ok(erase >= 0 && erase < profile && profile < auth)
+  assert.deepEqual(admin._calls[erase].params, { p_user_id: UID })
+})
+
+const NOT_ERASABLE = { message: 'Media-key registry rows can be erased only ...', hint: 'sporely_account_not_erasable' }
+
+test('an erasure refusal (content still present) reruns the content stages once, then stops before profile and auth deletion', async () => {
+  const admin = fakeAdmin({
+    rpcResponses: {
+      erase_account_media_retirements: () => ({ data: null, error: NOT_ERASABLE }),
+    },
+  })
+  const sleeps = []
+  const result = await runDeletionPlan({
+    uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT,
+    sleep: async ms => { sleeps.push(ms) },
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.stage, 'erase_media_retirements')
+  assert.deepEqual(sleeps, [CONTENT_RERUN_DELAY_MS])
+  assert.equal(admin._calls.filter(c => c.op === 'erase_account_media_retirements').length, 2)
+  assert.equal(admin._calls.some(c => c.op === 'deleteUser' || c.table === 'profiles'), false)
+})
+
+test('a late write left behind the fence is removed by the one content rerun', async () => {
+  let refusals = 1
+  let imageRows = [{ id: 1, storage_path: `${UID}/obs/first.webp` }]
+  const r2 = fakeR2({ legacy: [`${UID}/a.webp`] })
+  const admin = fakeAdmin({
+    tableResponses: {
+      observation_images: { select: () => ({ data: imageRows, error: null }) },
+    },
+    rpcResponses: {
+      erase_account_media_retirements: () => {
+        if (refusals > 0) {
+          refusals -= 1
+          // A late row and its upload land while the run waits.
+          imageRows = [{ id: 2, storage_path: `${UID}/obs/late.webp` }]
+          r2.buckets.private.add(`${UID}/obs/late.webp`)
+          return { data: null, error: NOT_ERASABLE }
+        }
+        return { data: { status: 'erased' }, error: null }
+      },
+    },
+  })
+  const worker = fakeWorker()
+  let signOuts = 0
+  const result = await runDeletionPlan({
+    uid: UID, admin, worker, r2Keys: new Set(), r2,
+    signOutEverywhere: async () => { signOuts += 1; return { error: null } },
+    sleep: async () => {},
+  })
+  assert.equal(result.ok, true)
+  assert.equal(signOuts, 1)
+  assert.equal(admin._calls.filter(c => c.op === 'begin_account_deletion').length, 1)
+  assert.equal(admin._calls.filter(c => c.table === 'observation_images' && c.op === 'delete').length, 2)
+  assert.equal(admin._calls.filter(c => c.op === 'delete_reference_library_for_account').length, 2)
+  assert.deepEqual([...r2.buckets.legacy, ...r2.buckets.private], [])
+  // The rerun sends Worker DELETEs only for the keys collected after the
+  // wait; the first pass's keys are not sent again.
+  const first = observationMediaDeleteTargets(`${UID}/obs/first.webp`)
+  const late = observationMediaDeleteTargets(`${UID}/obs/late.webp`)
+  assert.deepEqual(worker.deleted.slice().sort(), [...first, ...late].sort())
+  // Every stage from the first snapshot ran twice; the earlier ones once.
+  const start = EXPECTED_ORDER.indexOf(CONTENT_RERUN_FROM)
+  const erase = EXPECTED_ORDER.indexOf('erase_media_retirements')
+  assert.deepEqual(result.completed, [
+    ...EXPECTED_ORDER.slice(0, erase),
+    ...EXPECTED_ORDER.slice(start),
+  ])
+})
+
+test('global sign-out runs before any erasure; a sign-out failure stops it', async () => {
+  const order = []
+  const admin = fakeAdmin()
+  const r2 = fakeR2({ legacy: [`${UID}/a.webp`] })
+  const result = await runDeletionPlan({
+    uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2,
+    signOutEverywhere: async () => { order.push('signout'); return { error: { message: 'gotrue down' } } },
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.stage, 'sign_out_everywhere')
+  assert.deepEqual(order, ['signout'])
+  assert.deepEqual([...r2.buckets.legacy], [`${UID}/a.webp`])
+  assert.equal(admin._calls.length, 0)
+  const missing = await runDeletionPlan({ uid: UID, admin: fakeAdmin(), worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2() })
+  assert.equal(missing.stage, 'sign_out_everywhere')
+})
+
+test('a rerun after a partial failure completes (already signed out, marker kept)', async () => {
+  const r2 = fakeR2({ legacy: [`${UID}/a.webp`] })
+  let failErase = true
+  const admin = fakeAdmin({
+    rpcResponses: {
+      erase_account_media_retirements: () => (failErase
+        ? { data: null, error: { message: 'canceling statement due to lock timeout' } }
+        : { data: { status: 'erased' }, error: null }),
+    },
+  })
+  const first = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2, signOutEverywhere: SIGN_OUT })
+  assert.equal(first.ok, false)
+  assert.equal(first.stage, 'erase_media_retirements')
+  // Only the not-erasable refusal reruns the content stages.
+  assert.equal(admin._calls.filter(c => c.op === 'erase_account_media_retirements').length, 1)
+  failErase = false
+  const retry = await runDeletionPlan({
+    uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2,
+    signOutEverywhere: async () => ({ error: { message: 'Session not found' } }),
+  })
+  assert.equal(retry.ok, true)
+  assert.equal(admin._calls.filter(c => c.op === 'delete_reference_library_for_account').length, 2)
+})
+
+test('the deletion marker is written right after sign-out, before any snapshot or delete', async () => {
+  const admin = fakeAdmin()
+  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
+  assert.equal(result.ok, true)
+  assert.deepEqual(admin._calls[0], { table: '<rpc>', op: 'begin_account_deletion', params: { p_user_id: UID } })
+})
+
+test('begin_account_deletion must report fenced; not_found stops the run before any snapshot', async () => {
+  const admin = fakeAdmin({ rpcResponses: { begin_account_deletion: () => ({ data: { status: 'not_found' }, error: null }) } })
+  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
+  assert.equal(result.ok, false)
+  assert.equal(result.stage, 'begin_account_deletion')
+  assert.equal(admin._calls.length, 1)
 })
 
 // ── Pagination ──────────────────────────────────────────────────────
@@ -850,7 +1122,7 @@ test('media_snapshot reads every observation image page, past the max_rows cap',
   const imagePages = pagedSelect(images)
   const admin = fakeAdmin({ tableResponses: { observation_images: { select: imagePages.respond } } })
   const worker = fakeWorker()
-  const result = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+  const result = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(result.ok, true)
   const last = images.length - 1
   assert.ok(worker.deleted.includes(`${UID}/obs/${last}.webp`), 'last page image must be deleted')
@@ -871,7 +1143,7 @@ test('media_snapshot keeps paging when the server max_rows is below the page siz
   const imagePages = pagedSelect(images, { maxRows: 500 })
   const admin = fakeAdmin({ tableResponses: { observation_images: { select: imagePages.respond } } })
   const worker = fakeWorker()
-  const result = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+  const result = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(result.ok, true)
   assert.ok(worker.deleted.includes(`${UID}/obs/1199.webp`))
   assert.deepEqual(imagePages.pages.map(p => p.after), [null, 500, 1000, 1200])
@@ -887,7 +1159,7 @@ test('media_snapshot still collects the last row when a row is deleted between p
   })
   const admin = fakeAdmin({ tableResponses: { observation_images: { select: imagePages.respond } } })
   const r2Keys = new Set()
-  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys })
+  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys, r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(result.ok, true)
   assert.ok(r2Keys.has(`${UID}/obs/${SNAPSHOT_PAGE_SIZE}.webp`), 'the row after the first page must be snapshotted')
 })
@@ -899,7 +1171,7 @@ test('mosaic_media_snapshot still collects the last row when a row is deleted be
   })
   const admin = fakeAdmin({ tableResponses: { spore_measurement_mosaics: { select: mosaicPages.respond } } })
   const r2Keys = new Set()
-  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys })
+  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys, r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(result.ok, true)
   assert.ok(r2Keys.has(`${UID}/m/${SNAPSHOT_PAGE_SIZE}.webp`), 'the row after the first page must be snapshotted')
 })
@@ -909,10 +1181,21 @@ test('mosaic_media_snapshot reads every mosaic page', async () => {
   const mosaicPages = pagedSelect(mosaics)
   const admin = fakeAdmin({ tableResponses: { spore_measurement_mosaics: { select: mosaicPages.respond } } })
   const worker = fakeWorker()
-  const result = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+  const result = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(result.ok, true)
   assert.ok(worker.deleted.includes(`${UID}/m/${mosaics.length - 1}.webp`))
   assert.deepEqual(mosaicPages.pages.map(p => p.after), [null, SNAPSHOT_PAGE_SIZE, SNAPSHOT_PAGE_SIZE + 3])
+})
+
+test('calibration_media_snapshot reads every calibration page', async () => {
+  const calibrations = Array.from({ length: SNAPSHOT_PAGE_SIZE + 2 }, (_, i) => ({ image_storage_path: `${UID}/calibration/${i}.jpg` }))
+  const calibrationPages = pagedSelect(calibrations)
+  const admin = fakeAdmin({ tableResponses: { calibrations: { select: calibrationPages.respond } } })
+  const worker = fakeWorker()
+  const result = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
+  assert.equal(result.ok, true)
+  assert.ok(worker.deleted.includes(`${UID}/calibration/${calibrations.length - 1}.jpg`))
+  assert.deepEqual(calibrationPages.pages.map(p => p.after), [null, SNAPSHOT_PAGE_SIZE, SNAPSHOT_PAGE_SIZE + 2])
 })
 
 test('delete_legacy_storage removes every file when a folder holds more than one listing page', async () => {
@@ -947,7 +1230,7 @@ test('delete_legacy_storage removes every file when a folder holds more than one
     }),
   }
   const admin = fakeAdmin({ storage })
-  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set() })
+  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(result.ok, true)
   assert.deepEqual([...buckets['observation-images']], [])
   assert.deepEqual([...buckets.avatars], [])
@@ -959,7 +1242,7 @@ test('media_snapshot fails closed if the server ignores the keyset filter', asyn
   const respond = () => ({ data: fullPage, error: null })
   respond.paged = true
   const admin = fakeAdmin({ tableResponses: { observation_images: { select: respond } } })
-  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set() })
+  const result = await runDeletionPlan({ uid: UID, admin, worker: fakeWorker(), r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(result.ok, false)
   assert.equal(result.stage, 'media_snapshot')
   assert.match(result.error, /page limit/)
@@ -985,7 +1268,7 @@ test('runDeletionPlan: sweep_r2_prefix repeats until the worker reports done', a
       { ok: true, status: 200, deleted: 12, done: true },
     ],
   })
-  const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+  const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(r.ok, true)
   assert.equal(worker.sweeps.length, 3, 'preflight plus two sweep calls')
   assert.ok(admin._calls.find(c => c.op === 'deleteUser'))
@@ -1000,7 +1283,7 @@ test('runDeletionPlan: a failed sweep stops before the auth user is deleted', as
   ]) {
     const admin = fakeAdmin()
     const worker = fakeWorker(overrides)
-    const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+    const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
     assert.equal(r.ok, false)
     assert.equal(r.stage, 'sweep_r2_prefix')
     assert.ok(r.completed.includes('delete_profile'))
@@ -1019,7 +1302,7 @@ test('sweep_preflight runs first and stops the plan before any deletion when the
   ]) {
     const admin = fakeAdmin()
     const worker = fakeWorker({ preflight })
-    const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+    const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
     assert.equal(r.ok, false)
     assert.equal(r.stage, 'sweep_preflight')
     assert.deepEqual(r.completed, [])
@@ -1031,7 +1314,7 @@ test('sweep_preflight runs first and stops the plan before any deletion when the
 test('sweep_preflight accepts a real sweep on a retry after the profile is gone', async () => {
   const admin = fakeAdmin()
   const worker = fakeWorker({ preflight: () => ({ ok: true, status: 200, deleted: 7, done: true }) })
-  const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set() })
+  const r = await runDeletionPlan({ uid: UID, admin, worker, r2Keys: new Set(), r2: fakeR2(), signOutEverywhere: SIGN_OUT })
   assert.equal(r.ok, true)
 })
 
