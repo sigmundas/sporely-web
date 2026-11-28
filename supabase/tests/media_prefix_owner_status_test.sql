@@ -7,8 +7,9 @@
 --   * no profile, an auth user and no marker is not sweepable (review);
 --   * NULLs and duplicates are ignored, more than 1000 ids are refused;
 --   * only service_role may call it (SECURITY DEFINER, empty search_path);
---   * media_prefix_foreign_references counts other owners' rows that point
---     into a prefix (by key family), not the prefix owner's own rows.
+--   * media_prefix_foreign_references counts other owners' key values that
+--     mention '<uid>/' in any form (alias forms included), not the prefix
+--     owner's own rows.
 -- Run: psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/media_prefix_owner_status_test.sql
 
 BEGIN;
@@ -34,9 +35,10 @@ ON CONFLICT (id) DO NOTHING;
 -- wants without a profile.
 DELETE FROM public.profiles WHERE id IN ('00000000-0000-4000-8000-0000007e0a03', '00000000-0000-4000-8000-0000007e0a04');
 -- Media rows (content rows need a profile, so only live accounts own any).
--- 01 owns one under its own prefix, and a legacy row pointing into fully
--- deleted 05's prefix, planted behind the media-key guard as a pre-guard row
--- would be.
+-- 01 owns one under its own prefix, and legacy rows pointing into fully
+-- deleted 05's and 06's prefixes, planted behind the media-key guard as
+-- pre-guard rows would be; 06's in alias forms the web reader accepts (a
+-- media URL with the id in upper case, a bucket-prefixed key).
 WITH o AS (
   INSERT INTO public.observations (user_id, date, visibility, is_draft, spore_data_visibility, notes)
   VALUES ('00000000-0000-4000-8000-0000007e0a01', current_date, 'private', false, 'private', 'mpo own') RETURNING id
@@ -46,15 +48,19 @@ INSERT INTO public.observation_images (observation_id, user_id, storage_path, im
 SELECT o.id, '00000000-0000-4000-8000-0000007e0a01', '00000000-0000-4000-8000-0000007e0a01/a/photo.webp',
        'microscope', 'reduced', 100, 80, 50, 40, 10 FROM o;
 ALTER TABLE public.observation_images DISABLE TRIGGER zzy_media_key_retirement_guard;
+ALTER TABLE public.observations DISABLE TRIGGER zzy_media_key_retirement_guard;
 WITH o AS (
-  INSERT INTO public.observations (user_id, date, visibility, is_draft, spore_data_visibility, notes)
-  VALUES ('00000000-0000-4000-8000-0000007e0a01', current_date, 'private', false, 'private', 'mpo foreign') RETURNING id
+  INSERT INTO public.observations (user_id, date, visibility, is_draft, spore_data_visibility, notes, image_key, thumb_key)
+  VALUES ('00000000-0000-4000-8000-0000007e0a01', current_date, 'private', false, 'private', 'mpo foreign',
+          'https://media.sporely.no/00000000-0000-4000-8000-0000007E0A06/a.webp',
+          'sporely-media/00000000-0000-4000-8000-0000007e0a06/thumb_a.webp') RETURNING id
 )
 INSERT INTO public.observation_images (observation_id, user_id, storage_path, image_type, upload_mode,
                                        source_width, source_height, stored_width, stored_height, stored_bytes)
 SELECT o.id, '00000000-0000-4000-8000-0000007e0a01', '00000000-0000-4000-8000-0000007e0a05/g/small_photo.webp',
        'microscope', 'reduced', 100, 80, 50, 40, 10 FROM o;
 ALTER TABLE public.observation_images ENABLE ALWAYS TRIGGER zzy_media_key_retirement_guard;
+ALTER TABLE public.observations ENABLE ALWAYS TRIGGER zzy_media_key_retirement_guard;
 
 INSERT INTO private.reference_account_deletions (user_id) VALUES
   ('00000000-0000-4000-8000-0000007e0a02'),
@@ -107,37 +113,26 @@ BEGIN
 END $$;
 
 -- Foreign references.
-SELECT pg_temp.eq(public.media_prefix_foreign_references('00000000-0000-4000-8000-0000007e0a05',
-  ARRAY['00000000-0000-4000-8000-0000007e0a05/g/thumb_photo.webp', '00000000-0000-4000-8000-0000007e0a05/g/medium_photo.webp']), 1::bigint,
-  'a live owner''s legacy row into a deleted prefix counts once, by key family');
-SELECT pg_temp.eq(public.media_prefix_foreign_references('00000000-0000-4000-8000-0000007e0a05',
-  ARRAY['00000000-0000-4000-8000-0000007e0a05/other/x.webp']), 0::bigint, 'an unreferenced key');
-SELECT pg_temp.eq(public.media_prefix_foreign_references('00000000-0000-4000-8000-0000007e0a01',
-  ARRAY['00000000-0000-4000-8000-0000007e0a01/a/thumb_photo.webp']), 0::bigint, 'the prefix owner''s own row does not count');
-SELECT pg_temp.eq(public.media_prefix_foreign_references('00000000-0000-4000-8000-0000007e0a05',
-  ARRAY['00000000-0000-4000-8000-0000007e0a05/other/x.webp']::text[] || ARRAY[NULL, '']::text[]), 0::bigint, 'NULL and empty keys');
-SELECT pg_temp.eq(public.media_prefix_foreign_references('00000000-0000-4000-8000-0000007e0a05', NULL), 0::bigint, 'NULL keys');
+SELECT pg_temp.eq(public.media_prefix_foreign_references('00000000-0000-4000-8000-0000007e0a05'), 1::bigint,
+  'a live owner''s legacy row into a deleted prefix');
+SELECT pg_temp.eq(public.media_prefix_foreign_references('00000000-0000-4000-8000-0000007e0a06'), 2::bigint,
+  'alias forms: an upper-case media URL and a bucket-prefixed key');
+SELECT pg_temp.eq(public.media_prefix_foreign_references('00000000-0000-4000-8000-0000007e0a01'), 0::bigint,
+  'the prefix owner''s own rows do not count');
+SELECT pg_temp.eq(public.media_prefix_foreign_references('00000000-0000-4000-8000-0000007e0a07'), 0::bigint, 'an unreferenced prefix');
 DO $$
 BEGIN
-  PERFORM public.media_prefix_foreign_references('00000000-0000-4000-8000-0000007e0a05',
-    (SELECT array_agg('00000000-0000-4000-8000-0000007e0a05/k' || i || '.webp') FROM generate_series(1, 1001) i));
-  RAISE EXCEPTION 'FAIL more than 1000 keys accepted';
-EXCEPTION WHEN invalid_parameter_value THEN
-  NULL;
-END $$;
-DO $$
-BEGIN
-  PERFORM public.media_prefix_foreign_references(NULL, ARRAY['x/y.webp']);
+  PERFORM public.media_prefix_foreign_references(NULL);
   RAISE EXCEPTION 'FAIL NULL owner accepted';
 EXCEPTION WHEN invalid_parameter_value THEN
   NULL;
 END $$;
 SELECT pg_temp.eq(
   (SELECT string_agg(r, ',' ORDER BY r) FROM unnest(ARRAY['anon', 'authenticated', 'service_role']) r
-    WHERE has_function_privilege(r, 'public.media_prefix_foreign_references(uuid,text[])', 'EXECUTE')),
+    WHERE has_function_privilege(r, 'public.media_prefix_foreign_references(uuid)', 'EXECUTE')),
   'service_role', 'foreign references: only service_role may execute');
 SELECT pg_temp.eq(
-  (SELECT p.prosecdef AND p.proconfig = ARRAY['search_path=""'] FROM pg_proc p WHERE p.oid = 'public.media_prefix_foreign_references(uuid,text[])'::regprocedure),
+  (SELECT p.prosecdef AND p.proconfig = ARRAY['search_path=""'] FROM pg_proc p WHERE p.oid = 'public.media_prefix_foreign_references(uuid)'::regprocedure),
   true, 'foreign references: SECURITY DEFINER with an empty search_path');
 
 SELECT 'PASS: media_prefix_owner_status_test';

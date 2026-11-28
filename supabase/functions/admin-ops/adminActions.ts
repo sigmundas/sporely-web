@@ -1507,30 +1507,33 @@ export async function runRetiredKeySweep(
 // deletion run that got past delete_profile and was never retried.
 // public.media_prefix_owner_status (20261126130000) decides which prefixes
 // may be swept; nothing else is deleted. A prefix that another owner's row
-// still references (media_prefix_foreign_references) is left for review.
-// Per prefix: list the objects, check the owner again, then delete exactly
-// the listed objects, so an object written after the listing is never
-// touched and an owner that changed in between stops the delete; list again
-// afterwards and report 'incomplete' if anything is left.
+// still mentions in any key form (media_prefix_foreign_references) is left
+// for review. Per prefix: list the objects, check the owner again, then
+// delete exactly the listed objects, so an object written after the listing
+// is never touched and an owner that changed in between stops the delete;
+// list again afterwards and report 'incomplete' if anything is left.
 //
-// Dry run by default. A real run also needs the tombstone purge switch and
-// `expected_sweepable` equal to the number of sweepable prefixes (take it
-// from a dry run), and is refused when no prefix belongs to a live account:
-// both catch a database and an R2 bucket of different environments (local
-// functions with production R2 keys would classify every production prefix
-// as sweepable). No quota accounting: the profile is gone.
+// Dry run by default; it pages through the sweepable prefixes with `after`.
+// A real run also needs the tombstone purge switch and `user_ids`: the
+// prefixes to sweep, taken from a dry run's `would_delete` rows. Only those
+// are touched, and each must still be sweepable when the run reaches it, so
+// an approval covers exactly the prefixes the operator reviewed. A real run
+// is refused when any bucket holding user prefixes has none of a live
+// account: a database and a bucket of different environments (local
+// functions with production R2 keys, a private bucket setting of another
+// project) would otherwise classify every prefix in it as sweepable. No
+// quota accounting: the profile is gone.
 
 const ORPHAN_SWEEP_PREFIX_LIMIT_DEFAULT = 20
 const ORPHAN_SWEEP_PREFIX_LIMIT_MAX = 200
 const ORPHAN_SWEEP_OBJECT_BUDGET = 50_000
 const OWNER_STATUS_BATCH = 500
-const FOREIGN_REFERENCE_BATCH = 1000
 
 export type OrphanSweepObject = { bucket: string; key: string; size: number }
 
 export type OrphanSweepR2Client = {
   buckets: string[]
-  listTopLevelPrefixes: () => Promise<string[]>
+  listTopLevelPrefixes: () => Promise<Array<{ bucket: string; name: string }>>
   listObjects: (prefix: string) => Promise<OrphanSweepObject[]>
   deleteObjects: (objects: OrphanSweepObject[]) => Promise<void>
 }
@@ -1543,6 +1546,10 @@ type OwnerStatus = {
   sweepable: boolean
 }
 
+function isCanonicalUserPrefix(name: string) {
+  return isValidTombstoneUuid(name) && name === name.toLowerCase()
+}
+
 async function sweepOrphanMediaPrefixes(context: AdminActionContext): Promise<AdminActionResponse> {
   const reason = requireNonEmptyText(context.requestBody?.reason, 'Reason is required')
   if (!reason.ok) {
@@ -1552,23 +1559,32 @@ async function sweepOrphanMediaPrefixes(context: AdminActionContext): Promise<Ad
   if (!dryRun && !isTombstonePurgeEnabled(context.env)) {
     return actionFailureResponse(409, TOMBSTONE_PURGE_DISABLED, 'Tombstone purge (and the orphan prefix sweep) is disabled on the server; a dry run is still allowed')
   }
-  const expectedRaw = context.requestBody?.expected_sweepable
-  const expectedSweepable = Number.isInteger(expectedRaw) && Number(expectedRaw) >= 0 ? Number(expectedRaw) : null
-  if (!dryRun && expectedSweepable === null) {
-    return actionFailureResponse(400, 'expected_sweepable_required', 'A real run needs expected_sweepable: the sweepable count from a dry run')
-  }
   const limit = Math.min(ORPHAN_SWEEP_PREFIX_LIMIT_MAX, normalizePositiveInteger(context.requestBody?.limit, ORPHAN_SWEEP_PREFIX_LIMIT_DEFAULT))
+  const after = normalizeText(context.requestBody?.after) || null
+  if (after && !isCanonicalUserPrefix(after)) {
+    return actionFailureResponse(400, 'invalid_after', 'after must be a lowercase user id')
+  }
+  let userIds: string[] | null = null
+  if (!dryRun) {
+    const raw = context.requestBody?.user_ids
+    const list = Array.isArray(raw) ? [...new Set(raw.map(value => normalizeText(value)))] : []
+    if (!list.length || list.length > ORPHAN_SWEEP_PREFIX_LIMIT_MAX || !list.every(isCanonicalUserPrefix)) {
+      return actionFailureResponse(400, 'user_ids_required',
+        `A real run needs user_ids: 1-${ORPHAN_SWEEP_PREFIX_LIMIT_MAX} lowercase user ids from a dry run's would_delete rows`)
+    }
+    userIds = list
+  }
 
   return await withAdminActionLog({
     adminClient: context.adminClient,
     adminUser: context.adminUser,
     action: 'sweep_orphan_media_prefixes',
     targetType: 'media_prefix_batch',
-    targetId: `limit:${limit}:dry_run:${dryRun}`,
+    targetId: dryRun ? `dry_run:limit:${limit}:after:${after ?? ''}` : `user_ids:${userIds!.length}`,
     reason: reason.value,
     requestPayload: context.requestBody,
-    beforeSnapshot: { limit, dry_run: dryRun, expected_sweepable: expectedSweepable },
-    run: async () => runOrphanPrefixSweep(context, { limit, dryRun, expectedSweepable }),
+    beforeSnapshot: { limit, dry_run: dryRun, after, user_ids: userIds },
+    run: async () => runOrphanPrefixSweep(context, { limit, dryRun, after, userIds }),
   })
 }
 
@@ -1588,21 +1604,17 @@ async function loadOwnerStatuses(adminClient: any, userIds: string[]): Promise<M
   return statuses
 }
 
-async function countForeignReferences(adminClient: any, userId: string, keys: string[]): Promise<number> {
-  let total = 0
-  for (let i = 0; i < keys.length; i += FOREIGN_REFERENCE_BATCH) {
-    const { data, error } = await callRpcWithRetry(adminClient, 'media_prefix_foreign_references', {
-      p_user_id: userId,
-      p_keys: keys.slice(i, i + FOREIGN_REFERENCE_BATCH),
-    })
-    if (error) {
-      throw actionError(500, 'foreign_reference_check_failed', `media_prefix_foreign_references failed: ${error.message || error.code}`)
-    }
-    const count = Number(data)
-    if (!Number.isFinite(count)) throw actionError(500, 'foreign_reference_check_failed', 'media_prefix_foreign_references returned no count')
-    total += count
+async function countForeignReferences(adminClient: any, userId: string): Promise<number> {
+  const { data, error } = await callRpcWithRetry(adminClient, 'media_prefix_foreign_references', { p_user_id: userId })
+  if (error) {
+    throw actionError(500, 'foreign_reference_check_failed', `media_prefix_foreign_references failed: ${error.message || error.code}`)
   }
-  return total
+  // A missing or malformed count must never read as "no references".
+  const count = typeof data === 'number' ? data : typeof data === 'string' && /^\d+$/.test(data) ? Number(data) : NaN
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw actionError(500, 'foreign_reference_check_failed', 'media_prefix_foreign_references returned no count')
+  }
+  return count
 }
 
 function ownerState(status: OwnerStatus | undefined): 'live' | 'sweepable' | 'needs_review' {
@@ -1613,7 +1625,7 @@ function ownerState(status: OwnerStatus | undefined): 'live' | 'sweepable' | 'ne
 
 export async function runOrphanPrefixSweep(
   context: Pick<AdminActionContext, 'adminClient' | 'env'>,
-  options: { limit: number; dryRun: boolean; expectedSweepable?: number | null },
+  options: { limit: number; dryRun: boolean; after?: string | null; userIds?: string[] | null },
   clientFactory: (env: Record<string, string | undefined>) => OrphanSweepR2Client = createOrphanSweepR2Client,
 ) {
   const client = clientFactory(context.env)
@@ -1624,6 +1636,7 @@ export async function runOrphanPrefixSweep(
     needs_review: 0,
     sweepable: 0,
     foreign_referenced: 0,
+    not_sweepable: 0,
     would_delete: 0,
     swept: 0,
     partial: 0,
@@ -1635,16 +1648,17 @@ export async function runOrphanPrefixSweep(
   }
   const rows: Array<Record<string, unknown>> = []
 
-  const names = [...new Set(await client.listTopLevelPrefixes())]
+  const entries = await client.listTopLevelPrefixes()
+  const names = [...new Set(entries.map(entry => entry.name))]
   counts.prefixes_scanned = names.length
   // Only canonical lowercase user ids: other names (legacy folders, an id in
   // another case) are not keys the app writes under '<user_id>/', so they are
   // counted and left alone.
-  const canonical = names.filter(name => isValidTombstoneUuid(name) && name === name.toLowerCase())
+  const canonical = names.filter(isCanonicalUserPrefix).sort()
   counts.non_uuid_skipped = names.length - canonical.length
 
   const statuses = await loadOwnerStatuses(context.adminClient, canonical)
-  const candidates: string[] = []
+  const sweepable: string[] = []
   for (const userId of canonical) {
     const state = ownerState(statuses.get(userId))
     if (state === 'live') counts.live += 1
@@ -1657,26 +1671,52 @@ export async function runOrphanPrefixSweep(
         has_auth_user: status?.has_auth_user ?? null,
         deletion_marked: status?.deletion_marked ?? null,
       })
-    } else candidates.push(userId)
+    } else sweepable.push(userId)
   }
-  counts.sweepable = candidates.length
+  counts.sweepable = sweepable.length
 
-  if (!options.dryRun) {
-    if (canonical.length > 0 && counts.live === 0) {
-      throw actionError(409, 'no_live_prefixes', 'No media prefix belongs to a live account; the database and the R2 buckets may be of different environments', { counts })
+  // Environment check per bucket: every bucket that holds user prefixes must
+  // hold at least one of a live account.
+  const bucketsWithoutLive: string[] = []
+  for (const bucket of client.buckets) {
+    const own = entries.filter(entry => entry.bucket === bucket && isCanonicalUserPrefix(entry.name))
+    if (own.length && !own.some(entry => ownerState(statuses.get(entry.name)) === 'live')) bucketsWithoutLive.push(bucket)
+  }
+  if (!options.dryRun && bucketsWithoutLive.length) {
+    throw actionError(409, 'no_live_prefixes',
+      `No media prefix in ${bucketsWithoutLive.join(', ')} belongs to a live account; that bucket and the database may be of different environments`,
+      { counts, buckets_without_live: bucketsWithoutLive })
+  }
+
+  // Dry run: the next page of sweepable prefixes after `after`. Real run:
+  // exactly the requested prefixes; one that is not sweepable now is
+  // reported and left alone.
+  let targets: string[] = []
+  let nextAfter: string | null = null
+  if (options.dryRun) {
+    const remaining = sweepable.filter(id => !options.after || id > options.after)
+    targets = remaining.slice(0, options.limit)
+    if (remaining.length > targets.length) nextAfter = targets[targets.length - 1] ?? null
+  } else {
+    const sweepableSet = new Set(sweepable)
+    const present = new Set(canonical)
+    for (const userId of options.userIds ?? []) {
+      if (sweepableSet.has(userId)) targets.push(userId)
+      else {
+        counts.not_sweepable += 1
+        rows.push({ user_id: userId, status: 'not_sweepable', owner: present.has(userId) ? ownerState(statuses.get(userId)) : 'no_prefix' })
+      }
     }
-    if (options.expectedSweepable !== counts.sweepable) {
-      throw actionError(409, 'sweepable_count_mismatch', `expected_sweepable is ${options.expectedSweepable ?? 'missing'}, the sweep found ${counts.sweepable}; run a dry run first`, { counts })
-    }
+    targets = targets.slice(0, options.limit)
   }
 
   let objectBudget = ORPHAN_SWEEP_OBJECT_BUDGET
-  for (const userId of candidates.slice(0, options.limit)) {
+  for (const userId of targets) {
     if (!options.dryRun && objectBudget <= 0) break
     const prefix = `${userId}/`
     try {
       const listed = (await client.listObjects(prefix)).filter(object => object.key.startsWith(prefix))
-      const foreign = await countForeignReferences(context.adminClient, userId, [...new Set(listed.map(object => object.key))])
+      const foreign = await countForeignReferences(context.adminClient, userId)
       if (foreign > 0) {
         counts.foreign_referenced += 1
         rows.push({ user_id: userId, status: 'needs_review', foreign_references: foreign, objects: listed.length })
@@ -1719,12 +1759,21 @@ export async function runOrphanPrefixSweep(
     }
   }
 
-  // complete: every sweepable prefix was handled in this run and nothing is
-  // left behind or failed. Otherwise run the sweep again.
+  // complete (real run): every requested prefix was swept or deliberately
+  // left alone, and nothing failed or is left behind. Otherwise run it again.
+  const settled = counts.swept + counts.owner_changed + counts.foreign_referenced + counts.not_sweepable
   const complete = !options.dryRun
     && counts.errors === 0 && counts.partial === 0 && counts.incomplete === 0
-    && counts.swept + counts.owner_changed + counts.foreign_referenced >= counts.sweepable
-  return { dry_run: options.dryRun, complete, buckets: client.buckets, counts, rows }
+    && settled >= (options.userIds ?? []).length
+  return {
+    dry_run: options.dryRun,
+    complete,
+    next_after: nextAfter,
+    buckets: client.buckets,
+    buckets_without_live: bucketsWithoutLive,
+    counts,
+    rows,
+  }
 }
 
 // S3-compatible listing client for the orphan sweep. Unlike createR2Client it
@@ -1748,7 +1797,7 @@ export function createOrphanSweepR2Client(env: Record<string, string | undefined
   return {
     buckets,
     async listTopLevelPrefixes() {
-      const names = new Set<string>()
+      const entries = new Map<string, { bucket: string; name: string }>()
       try {
         for (const bucket of buckets) {
           let token: string | undefined
@@ -1756,7 +1805,7 @@ export function createOrphanSweepR2Client(env: Record<string, string | undefined
             const page = await s3.send(new ListObjectsV2Command({ Bucket: bucket, Delimiter: '/', ContinuationToken: token, MaxKeys: 1000 }))
             for (const entry of page.CommonPrefixes ?? []) {
               const name = String(entry.Prefix ?? '').replace(/\/$/, '')
-              if (name) names.add(name)
+              if (name) entries.set(`${bucket}/${name}`, { bucket, name })
             }
             token = page.IsTruncated ? page.NextContinuationToken : undefined
           } while (token)
@@ -1765,7 +1814,7 @@ export function createOrphanSweepR2Client(env: Record<string, string | undefined
         const failure = normalizeR2SdkFailure(error, 'R2 list failed')
         throw actionError(failure.status, 'r2_list_failed', failure.message)
       }
-      return [...names]
+      return [...entries.values()]
     },
     async listObjects(prefix: string) {
       if (!/^[0-9a-f-]{36}\/$/.test(prefix)) throw actionError(400, 'invalid_prefix', 'Refusing to list a prefix that is not <user_id>/')

@@ -16,7 +16,6 @@
 -- media_prefix_foreign_references (below) reports other owners' rows that
 -- still point into such a prefix; admin-ops then leaves it for review.
 --
--- Needs 20261126120000 (private.media_key_root, media_key_references).
 -- Service role only. Read-only.
 
 BEGIN;
@@ -63,14 +62,17 @@ COMMENT ON FUNCTION public.media_prefix_owner_status(uuid[]) IS
   'account-deletion marker exist, and whether the <user_id>/ media prefix may be swept '
   '(no profile, and no auth user or the deletion marker set). Service role only.';
 
--- Rows of OTHER owners that still reference the key families of p_keys
--- (through private.media_key_references, 20261126120000, on the key-root
--- expression indexes). The media-key guard refuses new cross-owner keys, but
--- a legacy row or a data restore can still point into a deleted account's
--- prefix; the sweep then leaves that prefix for review instead of deleting
--- bytes a live user shows. Rows of p_user_id itself do not count: they are
--- the deleted account's own leftovers.
-CREATE FUNCTION public.media_prefix_foreign_references(p_user_id uuid, p_keys text[])
+-- Rows of OTHER owners whose media key mentions '<p_user_id>/' anywhere, in
+-- any of the eight key columns private.media_key_references covers. The
+-- media-key guard refuses new cross-owner keys, but a legacy row or a data
+-- restore can still point into a deleted account's prefix, and the web
+-- reader accepts alias forms (full media or Storage URLs, a 'sporely-media/'
+-- or 'observation-images/' prefix, a leading slash) that the key-family
+-- lookup does not match. A substring match on '<uid>/' (case-insensitive)
+-- catches every such form. Any match leaves the whole prefix for review.
+-- Rows of p_user_id itself do not count: they are the account's own leftovers.
+-- Sequential scans of the key columns; the sweep calls it once per prefix.
+CREATE FUNCTION public.media_prefix_foreign_references(p_user_id uuid)
 RETURNS bigint
 LANGUAGE plpgsql
 STABLE
@@ -78,33 +80,36 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
-  v_roots text[];
+  v_needle text;
 BEGIN
   IF p_user_id IS NULL THEN
     RAISE EXCEPTION 'p_user_id is required' USING ERRCODE = '22023';
   END IF;
-  IF coalesce(pg_catalog.cardinality(p_keys), 0) > 1000 THEN
-    RAISE EXCEPTION 'media_prefix_foreign_references takes at most 1000 keys'
-      USING ERRCODE = '22023';
-  END IF;
-  SELECT pg_catalog.array_agg(DISTINCT private.media_key_root(k))
-    INTO v_roots
-    FROM pg_catalog.unnest(p_keys) AS k
-   WHERE private.media_key_root(k) IS NOT NULL;
-  IF v_roots IS NULL THEN
-    RETURN 0;
-  END IF;
-  RETURN (SELECT pg_catalog.count(*) FROM private.media_key_references(v_roots) r
-           WHERE r.owner_id IS DISTINCT FROM p_user_id);
+  v_needle := p_user_id::text || '/';
+  RETURN (
+    SELECT pg_catalog.count(*) FROM (
+      SELECT i.user_id AS owner_id, i.storage_path AS key FROM public.observation_images i
+      UNION ALL SELECT i.user_id, i.original_storage_path FROM public.observation_images i
+      UNION ALL SELECT m.user_id, m.image_key FROM public.spore_measurements m
+      UNION ALL SELECT m.user_id, m.thumb_key FROM public.spore_measurements m
+      UNION ALL SELECT o.user_id, o.image_key FROM public.observations o
+      UNION ALL SELECT o.user_id, o.thumb_key FROM public.observations o
+      UNION ALL SELECT s.user_id, s.storage_key FROM public.spore_measurement_mosaics s
+      UNION ALL SELECT c.user_id, c.image_storage_path FROM public.calibrations c
+    ) r
+    WHERE r.key IS NOT NULL
+      AND r.owner_id IS DISTINCT FROM p_user_id
+      AND pg_catalog.strpos(pg_catalog.lower(r.key), v_needle) > 0
+  );
 END
 $$;
 
-REVOKE ALL ON FUNCTION public.media_prefix_foreign_references(uuid, text[]) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.media_prefix_foreign_references(uuid, text[]) TO service_role;
+REVOKE ALL ON FUNCTION public.media_prefix_foreign_references(uuid) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.media_prefix_foreign_references(uuid) TO service_role;
 
-COMMENT ON FUNCTION public.media_prefix_foreign_references(uuid, text[]) IS
-  'admin-ops orphan prefix sweep: number of rows of owners other than p_user_id that '
-  'reference the key families of p_keys (at most 1000 keys). Service role only.';
+COMMENT ON FUNCTION public.media_prefix_foreign_references(uuid) IS
+  'admin-ops orphan prefix sweep: number of media key values of owners other than p_user_id '
+  'that mention <p_user_id>/ anywhere (any alias form). Service role only.';
 
 NOTIFY pgrst, 'reload schema';
 

@@ -1003,6 +1003,7 @@ const GONE = '00000000-0000-4000-8000-0000000000b2'
 const ABANDONED = '00000000-0000-4000-8000-0000000000b3'
 const REVIEW = '00000000-0000-4000-8000-0000000000b4'
 const UNKNOWN = '00000000-0000-4000-8000-0000000000b5'
+const NO_PREFIX = '00000000-0000-4000-8000-0000000000b6'
 
 type OwnerRow = { user_id: string; has_profile: boolean; has_auth_user: boolean; deletion_marked: boolean; sweepable: boolean }
 const OWNERS: Record<string, OwnerRow> = {
@@ -1010,13 +1011,14 @@ const OWNERS: Record<string, OwnerRow> = {
   [GONE]: { user_id: GONE, has_profile: false, has_auth_user: false, deletion_marked: false, sweepable: true },
   [ABANDONED]: { user_id: ABANDONED, has_profile: false, has_auth_user: true, deletion_marked: true, sweepable: true },
   [REVIEW]: { user_id: REVIEW, has_profile: false, has_auth_user: true, deletion_marked: false, sweepable: false },
+  [NO_PREFIX]: { user_id: NO_PREFIX, has_profile: false, has_auth_user: false, deletion_marked: false, sweepable: true },
 }
 
 // Owner-status and foreign-reference RPCs over tables a test may change
-// between calls.
-function ownerAdmin(owners: Record<string, OwnerRow> = OWNERS, options: { fail?: boolean; foreign?: Record<string, number> } = {}) {
+// between calls. `foreign` maps a user id to the RPC's data value.
+function ownerAdmin(owners: Record<string, OwnerRow> = OWNERS, options: { fail?: boolean; foreign?: Record<string, unknown> } = {}) {
   const calls: string[][] = []
-  const foreignCalls: Array<{ user: string; keys: string[] }> = []
+  const foreignCalls: string[] = []
   const table = { ...owners }
   return {
     calls,
@@ -1025,8 +1027,9 @@ function ownerAdmin(owners: Record<string, OwnerRow> = OWNERS, options: { fail?:
     client: {
       async rpc(name: string, args: any) {
         if (name === 'media_prefix_foreign_references') {
-          foreignCalls.push({ user: args.p_user_id, keys: [...args.p_keys] })
-          return { data: options.foreign?.[args.p_user_id] ?? 0, error: null }
+          foreignCalls.push(args.p_user_id)
+          const value = options.foreign && args.p_user_id in options.foreign ? options.foreign[args.p_user_id] : 0
+          return { data: value, error: null }
         }
         if (name !== 'media_prefix_owner_status') throw new Error(`unexpected rpc ${name}`)
         calls.push([...args.p_user_ids])
@@ -1039,20 +1042,25 @@ function ownerAdmin(owners: Record<string, OwnerRow> = OWNERS, options: { fail?:
 
 type Obj = { bucket: string; key: string; size: number }
 
-// R2 fake. The live account's prefix is always present, as in production.
+// R2 fake. A live account's prefix is in both buckets, as in production.
 function fakeOrphanR2(
   objects: Obj[],
-  options: { failDeleteFor?: string; onList?: (prefix: string) => void; onDelete?: (list: Obj[]) => void } = {},
+  options: { failDeleteFor?: string; onList?: (prefix: string) => void; noLiveIn?: string[] } = {},
 ) {
   const deleted: Array<{ bucket: string; key: string }> = []
-  const store: Obj[] = [{ bucket: 'legacy', key: `${LIVE}/live.webp`, size: 1 }, ...objects]
+  const store: Obj[] = [
+    ...['legacy', 'private'].filter(b => !options.noLiveIn?.includes(b)).map(bucket => ({ bucket, key: `${LIVE}/live.webp`, size: 1 })),
+    ...objects,
+  ]
   return {
     deleted,
     store,
     client: {
       buckets: ['legacy', 'private'],
       async listTopLevelPrefixes() {
-        return [...new Set(store.map(o => o.key.split('/')[0]))]
+        const seen = new Map<string, { bucket: string; name: string }>()
+        for (const o of store) seen.set(`${o.bucket}/${o.key.split('/')[0]}`, { bucket: o.bucket, name: o.key.split('/')[0] })
+        return [...seen.values()]
       },
       async listObjects(prefix: string) {
         options.onList?.(prefix)
@@ -1067,7 +1075,6 @@ function fakeOrphanR2(
           const i = store.findIndex(x => x.bucket === o.bucket && x.key === o.key)
           if (i >= 0) store.splice(i, 1)
         }
-        options.onDelete?.(list)
       },
     },
   }
@@ -1083,12 +1090,18 @@ const ORPHAN_OBJECTS: Obj[] = [
   { bucket: 'legacy', key: `${GONE.toUpperCase()}/upper.webp`, size: 1 },
 ]
 
-const run = (admin: ReturnType<typeof ownerAdmin>, r2: ReturnType<typeof fakeOrphanR2>, options: { limit?: number; dryRun?: boolean; expectedSweepable?: number | null } = {}) =>
+const run = (
+  admin: ReturnType<typeof ownerAdmin>,
+  r2: ReturnType<typeof fakeOrphanR2>,
+  options: { limit?: number; dryRun?: boolean; after?: string | null; userIds?: string[] | null } = {},
+) =>
   runOrphanPrefixSweep(
     { adminClient: admin.client, env: {} },
-    { limit: options.limit ?? 20, dryRun: options.dryRun ?? false, expectedSweepable: options.expectedSweepable },
+    { limit: options.limit ?? 20, dryRun: options.dryRun ?? !options.userIds, after: options.after ?? null, userIds: options.userIds ?? null },
     () => r2.client as any,
   ) as Promise<any>
+
+const keysOf = (list: Array<{ key: string }>) => list.map(o => o.key).sort()
 
 Deno.test('orphan sweep: a dry run reports sweepable prefixes and deletes nothing', async () => {
   const admin = ownerAdmin()
@@ -1099,49 +1112,82 @@ Deno.test('orphan sweep: a dry run reports sweepable prefixes and deletes nothin
   assertEquals(result.counts.non_uuid_skipped, 2)
   assertEquals([result.counts.live, result.counts.needs_review, result.counts.sweepable, result.counts.would_delete], [1, 2, 2, 2])
   const would = result.rows.filter((r: any) => r.status === 'would_delete').map((r: any) => [r.user_id, r.objects, r.bytes])
-  assertEquals(would.sort(), [[GONE, 2, 23], [ABANDONED, 1, 7]].sort())
+  assertEquals(would, [[GONE, 2, 23], [ABANDONED, 1, 7]])
   const review = result.rows.filter((r: any) => r.status === 'needs_review').map((r: any) => r.user_id).sort()
   assertEquals(review, [REVIEW, UNKNOWN].sort())
   assertEquals(admin.calls.length, 1) // a dry run classifies once and never re-checks
-  assertEquals(result.complete, false)
+  assertEquals([result.complete, result.next_after, result.buckets_without_live], [false, null, []])
 })
 
-Deno.test('orphan sweep: a real run deletes exactly the listed objects of sweepable prefixes', async () => {
+Deno.test('orphan sweep: a dry run pages with after, so review items do not block later prefixes', async () => {
+  const r2 = fakeOrphanR2(ORPHAN_OBJECTS)
+  const admin = ownerAdmin(OWNERS, { foreign: { [GONE]: 2 } })
+  const first = await run(admin, r2, { dryRun: true, limit: 1 })
+  assertEquals([first.rows.find((r: any) => r.user_id === GONE)?.foreign_references, first.next_after], [2, GONE])
+  const second = await run(admin, r2, { dryRun: true, limit: 1, after: first.next_after })
+  assertEquals([second.rows.find((r: any) => r.status === 'would_delete')?.user_id, second.next_after], [ABANDONED, null])
+})
+
+Deno.test('orphan sweep: a real run deletes exactly the listed objects of the requested prefixes', async () => {
   const admin = ownerAdmin()
   const r2 = fakeOrphanR2(ORPHAN_OBJECTS)
-  const result = await run(admin, r2, { expectedSweepable: 2 })
-  assertEquals(r2.deleted.map(o => o.key).sort(), [`${GONE}/late.webp`, `${GONE}/thumb_late.webp`, `${ABANDONED}/x.webp`].sort())
+  const result = await run(admin, r2, { userIds: [GONE, ABANDONED] })
+  assertEquals(keysOf(r2.deleted), [`${GONE}/late.webp`, `${GONE}/thumb_late.webp`, `${ABANDONED}/x.webp`].sort())
   assertEquals([result.counts.swept, result.counts.objects_deleted, result.counts.bytes_deleted], [2, 3, 30])
-  assertEquals(r2.store.map(o => o.key).sort(), [
-    `${LIVE}/live.webp`, `${REVIEW}/y.webp`, `${UNKNOWN}/z.webp`, 'artsorakel/cache.json', `${GONE.toUpperCase()}/upper.webp`,
+  assertEquals(keysOf(r2.store), [
+    `${LIVE}/live.webp`, `${LIVE}/live.webp`, `${REVIEW}/y.webp`, `${UNKNOWN}/z.webp`, 'artsorakel/cache.json', `${GONE.toUpperCase()}/upper.webp`,
   ].sort())
   // One classification of every prefix, then one re-check per swept prefix.
-  assertEquals(admin.calls.slice(1).map(c => c.join()).sort(), [GONE, ABANDONED].sort())
+  assertEquals(admin.calls.slice(1).map(c => c.join()), [GONE, ABANDONED])
   assertEquals(result.complete, true)
 })
 
-Deno.test('orphan sweep: a real run needs expected_sweepable to match, and a live prefix to exist', async () => {
+Deno.test('orphan sweep: a real run touches only the requested prefixes', async () => {
   const r2 = fakeOrphanR2(ORPHAN_OBJECTS)
-  await assertRejects(() => run(ownerAdmin(), r2, { expectedSweepable: 1 }), 'the sweep found 2')
-  await assertRejects(() => run(ownerAdmin(), r2, { expectedSweepable: null }), 'the sweep found 2')
-  // A database of another environment knows none of the bucket's accounts.
-  const otherEnv = ownerAdmin({
-    [GONE]: OWNERS[GONE],
-    [LIVE]: { ...OWNERS[GONE], user_id: LIVE },
-    [ABANDONED]: OWNERS[ABANDONED],
-  })
-  await assertRejects(() => run(otherEnv, r2, { expectedSweepable: 3 }), 'different environments')
+  const result = await run(ownerAdmin(), r2, { userIds: [ABANDONED] })
+  assertEquals(keysOf(r2.deleted), [`${ABANDONED}/x.webp`])
+  assertEquals([result.counts.swept, result.complete], [1, true])
+})
+
+Deno.test('orphan sweep: a requested prefix that is not sweepable now is reported, not deleted', async () => {
+  const r2 = fakeOrphanR2(ORPHAN_OBJECTS)
+  const result = await run(ownerAdmin(), r2, { userIds: [LIVE, REVIEW, UNKNOWN, NO_PREFIX] })
+  assertEquals(r2.deleted, [])
+  assertEquals(result.counts.not_sweepable, 4)
+  const owners = Object.fromEntries(result.rows.filter((r: any) => r.status === 'not_sweepable').map((r: any) => [r.user_id, r.owner]))
+  assertEquals(owners, { [LIVE]: 'live', [REVIEW]: 'needs_review', [UNKNOWN]: 'needs_review', [NO_PREFIX]: 'no_prefix' })
+})
+
+Deno.test('orphan sweep: a real run is refused when a bucket holds no live prefix', async () => {
+  // The private bucket setting points at another environment: none of its
+  // prefixes belongs to a live account in this database.
+  const r2 = fakeOrphanR2(ORPHAN_OBJECTS, { noLiveIn: ['private'] })
+  const dry = await run(ownerAdmin(), r2, { dryRun: true })
+  assertEquals(dry.buckets_without_live, ['private'])
+  await assertRejects(() => run(ownerAdmin(), r2, { userIds: [GONE, ABANDONED] }), 'different environments')
   assertEquals(r2.deleted, [])
 })
 
 Deno.test('orphan sweep: a prefix another owner still references is left for review', async () => {
   const admin = ownerAdmin(OWNERS, { foreign: { [GONE]: 1 } })
   const r2 = fakeOrphanR2(ORPHAN_OBJECTS)
-  const result = await run(admin, r2, { expectedSweepable: 2 })
-  assertEquals(r2.deleted.map(o => o.key), [`${ABANDONED}/x.webp`])
+  const result = await run(admin, r2, { userIds: [GONE, ABANDONED] })
+  assertEquals(keysOf(r2.deleted), [`${ABANDONED}/x.webp`])
   assertEquals(result.counts.foreign_referenced, 1)
   assertEquals(result.rows.find((r: any) => r.user_id === GONE)?.foreign_references, 1)
-  assertEquals(admin.foreignCalls.find(c => c.user === GONE)?.keys.sort(), [`${GONE}/late.webp`, `${GONE}/thumb_late.webp`])
+  assertEquals(admin.foreignCalls, [GONE, ABANDONED])
+})
+
+Deno.test('orphan sweep: a missing or malformed foreign-reference count deletes nothing', async () => {
+  for (const value of [null, undefined, 'x', -1, 1.5, {}]) {
+    const r2 = fakeOrphanR2(ORPHAN_OBJECTS)
+    const result = await run(ownerAdmin(OWNERS, { foreign: { [GONE]: value } }), r2, { userIds: [GONE] })
+    assertEquals(r2.deleted, [])
+    assertEquals(result.rows.find((r: any) => r.user_id === GONE)?.status, 'error')
+  }
+  const r2 = fakeOrphanR2(ORPHAN_OBJECTS)
+  await run(ownerAdmin(OWNERS, { foreign: { [GONE]: '0' } }), r2, { userIds: [GONE] })
+  assertEquals(r2.deleted.length, 2) // a numeric string from PostgREST bigint is accepted
 })
 
 Deno.test('orphan sweep: an object written after the listing is not deleted and the prefix is incomplete', async () => {
@@ -1154,9 +1200,9 @@ Deno.test('orphan sweep: an object written after the listing is not deleted and 
       if (listings === 1) queueMicrotask(() => r2.store.push({ bucket: 'legacy', key: `${prefix}newer.webp`, size: 4 }))
     },
   })
-  const result = await run(admin, r2, { expectedSweepable: 1 })
-  assertEquals(r2.deleted.map(o => o.key), [`${GONE}/late.webp`])
-  assertEquals(r2.store.map(o => o.key).sort(), [`${LIVE}/live.webp`, `${GONE}/newer.webp`].sort())
+  const result = await run(admin, r2, { userIds: [GONE] })
+  assertEquals(keysOf(r2.deleted), [`${GONE}/late.webp`])
+  assertEquals(r2.store.some(o => o.key === `${GONE}/newer.webp`), true)
   assertEquals(result.rows.find((r: any) => r.user_id === GONE)?.status, 'incomplete')
   assertEquals(result.complete, false)
 })
@@ -1166,7 +1212,7 @@ Deno.test('orphan sweep: an owner that comes back between listing and delete sto
   const r2 = fakeOrphanR2([{ bucket: 'legacy', key: `${ABANDONED}/x.webp`, size: 7 }], {
     onList: () => { admin.table[ABANDONED] = { ...OWNERS[ABANDONED], has_profile: true, sweepable: false } },
   })
-  const result = await run(admin, r2, { expectedSweepable: 1 })
+  const result = await run(admin, r2, { userIds: [ABANDONED] })
   assertEquals(r2.deleted, [])
   assertEquals(result.counts.owner_changed, 1)
   assertEquals(result.rows.find((r: any) => r.user_id === ABANDONED)?.owner, 'live')
@@ -1174,31 +1220,30 @@ Deno.test('orphan sweep: an owner that comes back between listing and delete sto
 
 Deno.test('orphan sweep: a failed owner lookup deletes nothing', async () => {
   const r2 = fakeOrphanR2(ORPHAN_OBJECTS)
-  await assertRejects(() => run(ownerAdmin(OWNERS, { fail: true }), r2, { expectedSweepable: 2 }), 'media_prefix_owner_status failed')
+  await assertRejects(() => run(ownerAdmin(OWNERS, { fail: true }), r2, { userIds: [GONE] }), 'media_prefix_owner_status failed')
   assertEquals(r2.deleted, [])
 })
 
 Deno.test('orphan sweep: a failed delete is reported and the next prefix still runs', async () => {
-  const admin = ownerAdmin()
   const r2 = fakeOrphanR2(ORPHAN_OBJECTS, { failDeleteFor: `${GONE}/` })
-  const result = await run(admin, r2, { expectedSweepable: 2 })
+  const result = await run(ownerAdmin(), r2, { userIds: [GONE, ABANDONED] })
   assertEquals(result.counts.errors, 1)
   assertEquals(result.rows.find((r: any) => r.user_id === GONE)?.status, 'error')
-  assertEquals(r2.deleted.map(o => o.key), [`${ABANDONED}/x.webp`])
+  assertEquals(keysOf(r2.deleted), [`${ABANDONED}/x.webp`])
   assertEquals(result.complete, false)
 })
 
 Deno.test('orphan sweep: the prefix limit caps the work per run', async () => {
-  const result = await run(ownerAdmin(), fakeOrphanR2(ORPHAN_OBJECTS), { limit: 1, expectedSweepable: 2 })
-  assertEquals([result.counts.sweepable, result.counts.swept, result.complete], [2, 1, false])
+  const result = await run(ownerAdmin(), fakeOrphanR2(ORPHAN_OBJECTS), { limit: 1, userIds: [GONE, ABANDONED] })
+  assertEquals([result.counts.swept, result.complete], [1, false])
 })
 
 Deno.test('orphan sweep: a prefix over the object budget is deleted in part and finished by the next run', async () => {
   const many = Array.from({ length: 50_001 }, (_, i) => ({ bucket: 'legacy', key: `${GONE}/o${i}.webp`, size: 1 }))
   const r2 = fakeOrphanR2(many)
-  const first = await run(ownerAdmin(), r2, { expectedSweepable: 1 })
+  const first = await run(ownerAdmin(), r2, { userIds: [GONE] })
   assertEquals([first.rows.find((r: any) => r.user_id === GONE)?.status, first.counts.objects_deleted, first.complete], ['partial', 50_000, false])
-  const second = await run(ownerAdmin(), r2, { expectedSweepable: 1 })
+  const second = await run(ownerAdmin(), r2, { userIds: [GONE] })
   assertEquals([second.counts.swept, second.counts.objects_deleted, second.complete], [1, 1, true])
 })
 
@@ -1206,20 +1251,24 @@ Deno.test('orphan sweep: a failed delete still uses up the object budget', async
   const gone = Array.from({ length: 30_000 }, (_, i) => ({ bucket: 'legacy', key: `${GONE}/o${i}.webp`, size: 1 }))
   const abandoned = Array.from({ length: 30_000 }, (_, i) => ({ bucket: 'legacy', key: `${ABANDONED}/o${i}.webp`, size: 1 }))
   const r2 = fakeOrphanR2([...gone, ...abandoned], { failDeleteFor: `${GONE}/` })
-  const result = await run(ownerAdmin(), r2, { expectedSweepable: 2 })
+  const result = await run(ownerAdmin(), r2, { userIds: [GONE, ABANDONED] })
   // The failed 30,000 count; only 20,000 of the second prefix fit the 50,000 budget.
   assertEquals(r2.deleted.length, 20_000)
   assertEquals(result.counts.errors, 1)
 })
 
-Deno.test('orphan sweep: a real run is refused while purge is disabled or without expected_sweepable; it needs a reason', async () => {
+Deno.test('orphan sweep: request validation (reason, purge switch, user_ids, after)', async () => {
   const { calls, adminClient } = purgeSpyClients()
   const base = { adminClient, adminUser: { id: 'admin', email: null }, authHeader: '' }
-  const refused = await handleAdminAction({ ...base, env: {}, requestBody: { action: 'sweep_orphan_media_prefixes', reason: 'test', dry_run: false, expected_sweepable: 1 } })
-  assertEquals(refused.status, 409)
-  assertEquals((refused.body as any).error?.code, TOMBSTONE_PURGE_DISABLED)
-  const noCount = await handleAdminAction({ ...base, env: ENABLED, requestBody: { action: 'sweep_orphan_media_prefixes', reason: 'test', dry_run: false } })
-  assertEquals((noCount.body as any).error?.code, 'expected_sweepable_required')
+  const body = (extra: Record<string, unknown>) => ({ action: 'sweep_orphan_media_prefixes', reason: 'test', ...extra })
+  const disabled = await handleAdminAction({ ...base, env: {}, requestBody: body({ dry_run: false, user_ids: [GONE] }) })
+  assertEquals([disabled.status, (disabled.body as any).error?.code], [409, TOMBSTONE_PURGE_DISABLED])
+  for (const userIds of [undefined, [], ['not-a-uuid'], [GONE.toUpperCase()], Array.from({ length: 201 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`)]) {
+    const response = await handleAdminAction({ ...base, env: ENABLED, requestBody: body({ dry_run: false, user_ids: userIds }) })
+    assertEquals((response.body as any).error?.code, 'user_ids_required')
+  }
+  const badAfter = await handleAdminAction({ ...base, env: {}, requestBody: body({ after: 'x' }) })
+  assertEquals((badAfter.body as any).error?.code, 'invalid_after')
   const noReason = await handleAdminAction({ ...base, env: {}, requestBody: { action: 'sweep_orphan_media_prefixes' } })
   assertEquals(noReason.status, 400)
   assertEquals(calls, [])
