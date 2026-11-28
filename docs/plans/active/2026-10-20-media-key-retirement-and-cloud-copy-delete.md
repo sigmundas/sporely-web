@@ -859,14 +859,56 @@ failures as on main), §K fixture (42 cases), REST and concurrency (46 races) pa
   - Remaining gaps (Codex review 2026-11-26, confirmed in `handleUpload`): the post-write lookup
     fails open. If the profile lookup errors (`profile_fetch_failed`), the Worker returns 500 and
     keeps the write; if the cleanup delete fails, it only logs. In both cases a write that lands
-    after the final sweep survives the account. Stage 0b: decide whether a failed lookup removes
-    the write (it would also drop a live user's overwrite on a transient error), and add the
-    admin-ops orphan-prefix sweep, which also catches these and abandoned runs (profile deleted,
-    sweep never completed, the user never retries).
+    after the final sweep survives the account. Open (user undecided 2026-11-26): whether a failed
+    lookup should remove the write (it would also drop a live user's overwrite on a transient
+    error). The orphan-prefix sweep below cleans up both cases afterwards.
+  - Orphan-prefix sweep (implemented 2026-11-26 on this branch, user decision): admin-ops action
+    `sweep_orphan_media_prefixes` with migration `20261126130000_media_prefix_owner_status.sql`.
+    - It lists the top-level `<user_id>/` prefixes in every configured bucket (canonical lowercase
+      UUIDs only; other folders are counted and left alone) and classifies them through
+      `public.media_prefix_owner_status`. Sweepable: no profile, and either no auth user (fully
+      deleted; the account-deletion marker cascades with it) or the marker set (a run that got
+      past `delete_profile` and never finished). No profile, an auth user and no marker:
+      `needs_review`, never deleted. A profile: live.
+    - Per sweepable prefix: list the objects; if any other owner's key value mentions `<uid>/`
+      anywhere, case-insensitively (`public.media_prefix_foreign_references`; this also catches
+      the alias forms the web reader accepts: media or Storage URLs, `sporely-media/` or
+      `observation-images/` prefixes, a leading slash), leave the prefix for review; otherwise
+      check the owner again, delete exactly the listed objects, and list again (`incomplete` if
+      anything is left). At most 50,000 objects per run (charged before each delete; a larger
+      prefix is `partial` and continues next run), `limit` prefixes per run (default 20, max 200).
+      The foreign check scans the eight key columns once per prefix.
+    - Dry run by default; it pages through the sweepable prefixes with `after` (the result's
+      `next_after`). A real run needs `dry_run: false`, `ADMIN_TOMBSTONE_PURGE_ENABLED`, a reason,
+      and `user_ids`: the prefixes to sweep, copied from the dry run's `would_delete` rows. Only
+      those are touched; one that is no longer sweepable is reported as `not_sweepable`. A real run
+      is refused when any bucket holding user prefixes has none of a live account (the dry run
+      reports such buckets in `buckets_without_live`): this catches a database and a bucket of
+      different environments (local functions with production R2 keys, a private bucket setting
+      of another project). `R2_PRIVATE_BUCKET_NAME` must be set (a name or `none`). No quota
+      accounting (the profile is gone). Logged in the admin action log; `result.complete` is false
+      whenever a rerun is needed.
+    - Codex challenge (2026-11-26, astra), fixed: the environment mismatch, foreign references,
+      'swept' with objects left, the budget bypass on a failed delete, and the forever-deferred
+      large prefix. Rejected: same-UID account recovery racing the sweep (no recovery flow exists)
+      and the Worker sweep's weaker owner rule (it only deletes the caller's own prefix with the
+      caller's token). Pre-existing, not fixed here: admin-ops checks only `is_admin`, so a banned
+      admin keeps every admin action (`index.ts`; needs a separate auth change).
+    - Codex review of the fixes (2026-11-26, sol), fixed: the environment check now runs per
+      bucket; the approval is bound to explicit `user_ids` instead of a count; `after` paging so
+      review items do not block later prefixes; alias key forms in the foreign check; a missing
+      foreign-reference count is an error, not zero. Whether production rows use alias forms was
+      not checked (the read-only query was interrupted); the substring match covers them either
+      way.
+    - Rollout: deploy with this branch, then run a dry run and review `needs_review`,
+      `buckets_without_live` and `would_delete` before any real run. A real run deletes production
+      data and needs the user's approval of the specific run and its `user_ids`.
 - Rollout rule: delete-account with this branch's stages needs main's Worker at or after 92eb862
   (post-write profile fence) and f7f3a4d (refuse uploads without the profile lookup) live. Check
   the deployed Worker version before deploying delete-account. `sweep_preflight` only proves the
-  sweep route exists (8b68b7b and later), not that the fence is there.
+  sweep route exists (8b68b7b and later), not that the fence is there. Checked 2026-11-26: the
+  live Worker is version `fc0bcc1a` (100% of traffic, `wrangler deployments status`), deployed
+  from PR #76 (`01a28bc`), which contains both commits.
 - Known limit (Codex review 2026-11-26, low): `delete_r2_prefix` deletes objects before
   `delete_r2_media` sends the per-key Worker DELETEs, so those find nothing and debit 0. If a later
   stage fails, the fenced account stays charged for media it no longer has (safe direction;
@@ -901,4 +943,5 @@ Local verification (isolated stack, Postgres 17.6.1.084):
   `deno check` of delete-account passes; admin-ops' only error is the pre-existing TS2345 in
   `index.ts:123` (file identical to main).
 
-Deploy with `node scripts/supabase-deploy-tree.mjs prepare --allow 20261126120000 ...`.
+Deploy with `node scripts/supabase-deploy-tree.mjs prepare --allow 20261126120000,20261126130000 ...`
+(`20261126130000_media_prefix_owner_status.sql` needs `20261126120000`).
